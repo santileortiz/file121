@@ -10,6 +10,9 @@ import socketserver
 import urllib.parse as urlparse
 from urllib.parse import parse_qs
 
+# TODO: How would things change if I use this?
+#from google_auth_oauthlib.flow import Flow
+
 # Client secret configuration file, downloaded from the Google Console
 client_secret_fname = 'client_secret.json'
 
@@ -28,6 +31,9 @@ class AuthorizationRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         global authorization_code 
         parsed = urlparse.urlparse(self.path)
+
+        # TODO: If authentication fails this probably crashes, should handle
+        # this case better.
         authorization_code = parse_qs(parsed.query)['code'][0]
 
         # TODO: Have a nicer page with this message.
@@ -53,7 +59,15 @@ def client_credentials():
         j = json_load (client_secret_fname)
         return j['installed']['client_id'], j['installed']['client_secret'],
 
+def oauth_session ():
+    client_id, client_secret = client_credentials()
+    redirect_uri = 'http://127.0.0.1:' + str(redirect_port)
+
+    return OAuth2Session(client_id, scope=scope, redirect_uri=redirect_uri), client_id, client_secret
+
 def google_authenticate():
+    # TODO: Try other authentication flows?. Implicit authentication or API key could also be useful.
+
     token = None
     try:
         token = py_literal_load (token_fname)
@@ -62,11 +76,8 @@ def google_authenticate():
         ##################################
         ## Authenticate for the first time
 
-        client_id, client_secret = client_credentials()
-        redirect_uri = 'http://127.0.0.1:' + str(redirect_port)
-
         # Create authentication request URL and open web browser with it
-        oauth = OAuth2Session(client_id, scope=scope, redirect_uri=redirect_uri)
+        oauth, client_id, client_secret = oauth_session()
         authorization_url, state = oauth.authorization_url(authorization_base_url, access_type="offline", prompt="select_account")
         webbrowser.open_new_tab(authorization_url)
 
@@ -86,7 +97,7 @@ def __google_get(*args, **kwargs):
 
     client_id, client_secret = client_credentials()
     oauth = OAuth2Session(client_id, token=token)
-    return oauth.get(*args, **kwargs)
+    return oauth.get(*args, **kwargs).json()
 
 def get(*args, **kwargs):
     r = None
@@ -98,8 +109,9 @@ def get(*args, **kwargs):
         ####################
         ## Refresh the token
 
-        client_id, client_secret = client_credentials()
-        token = oauth.refresh_token(token_url, client_id=client_id, client_secret=client_secret)
+        oauth, client_id, client_secret = oauth_session()
+        expired_token = py_literal_load (token_fname)
+        token = oauth.refresh_token(token_url, client_id=client_id, client_secret=client_secret, refresh_token=expired_token['refresh_token'])
         py_literal_dump (token, token_fname)
 
         # Retry once
