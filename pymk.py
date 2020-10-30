@@ -5,6 +5,7 @@ import google_utility as google
 dump_fname = 'full_file_dump'
 file_dict_fname = 'file_dict'
 file_tree_fname = 'file_tree'
+file_name_tree_fname = 'file_name_tree'
 
 def default ():
     target = store_get ('last_snip', default='example_procedure')
@@ -21,8 +22,7 @@ def sequential_file_dump ():
     progress_flag_name = 'sequentialTraversalInProgress'
     is_in_progress = store_get(progress_flag_name, default=False) and not restart
 
-    parameters = {'fields':'nextPageToken,files(id,name,md5Checksum,parents)', 'pageSize':1000,
-            'includeItemsFromAllDrives': True, 'supportsAllDrives': True}
+    parameters = {'fields':'nextPageToken,files(id,name,md5Checksum,parents)', 'pageSize':1000, 'q':'trashed = false'}
 
     files = []
     if is_in_progress:
@@ -119,26 +119,99 @@ def build_file_tree():
     file_dict = py_literal_load (file_dict_fname)
 
     roots = []
-    if path_exists(file_tree_fname):
-        roots = py_literal_load (file_tree_fname)
+    for f_id, f in file_dict.items():
+        if 'parents' in f.keys():
+            for parent_id in f['parents']:
+                if parent_id in file_dict.keys():
+                    parent = file_dict[parent_id]
+                    if 'c' not in parent.keys():
+                        parent['c'] = []
 
-    else:
-        for f_id, f in file_dict.items():
-            if 'parents' in f.keys():
-                for parent_id in f['parents']:
-                    if parent_id in file_dict.keys():
-                        parent = file_dict[parent_id]
-                        if 'c' not in parent.keys():
-                            parent['c'] = []
+                    parent['c'].append(f)
+        else:
+            roots.append(f)
 
-                        parent['c'].append(f)
-            else:
-                roots.append(f)
+    py_literal_dump (roots, file_tree_fname)
 
-        py_literal_dump (roots, file_tree_fname)
+def build_file_name_tree():
+    """
+    This transforms the tree from before that uses arrays for the children into
+    a version that uses name indexed dictionaries. This is the one we will use
+    to query the upstream existance and MD5 hash of a local file when doing the
+    diff.
+    """
 
-    for root in roots:
-        recursive_tree_print('', root)
+    # Google Drive allows multiple files with the same name in the same
+    # directory. File systems on the other hand, don't allow this. Also,
+    # Windows is case insensitive while Unix file systems are case sensitive.
+    # When downloading a subtree from Google Drive we need to make sure the
+    # upstream file tree follows the operating system's constraints before we
+    # even start. We may need to ask the user to fix the problems, or at least
+    # make them know there's something going on that they may not be expecting.
+    # This function will expose those problems if they exist.
+
+    # TODO: Implement this as a tree traversal
+    # TODO: Implement a version of this that considers names equal in a case
+    # insensitive way.
+    file_dict = py_literal_load (file_dict_fname)
+
+    root = {}
+    for f_id, f in file_dict.items():
+        if 'parents' in f.keys():
+            for parent_id in f['parents']:
+                if parent_id in file_dict.keys():
+                    parent = file_dict[parent_id]
+                    if 'c' not in parent.keys():
+                        parent['c'] = {}
+
+                    if f['name'] not in parent['c'].keys():
+                        parent['c'][f['name']] = f
+                    else:
+                        if 'duplicateNames' not in parent['c'][f['name']].keys():
+                            parent['c'][f['name']]['duplicateNames'] = []
+                        parent['c'][f['name']]['duplicateNames'].append(f['id'])
+                        print(f"Found file with existing name '{f['name']}' in directory '{parent['name']}': (old: {parent['c'][f['name']]['id']}) {f['id']}")
+        else:
+            root[f['name']] = f
+
+    py_literal_dump (root, file_name_tree_fname)
+
+def recursive_name_duplicates_print(path, node):
+    if 'duplicateNames' in node.keys():
+        print (path)
+
+    if 'c' in node.keys():
+        for name, child in node['c'].items():
+            recursive_name_duplicates_print(path_cat(path, name), child)
+
+def find_name_duplicates():
+    # NOTE: It's possible that we get duplicates while building the file name
+    # tree but not here. That's because the full file dump contains shared
+    # folders to, and here we assume the passed path has the user's 'My Drive'
+    # as root.
+
+    # This is uglier than I wanted because oddly enough
+    #       ''.split(' ') returns ['']
+    # but
+    #       ''.split() returns []
+    # why?...
+    path = '/'
+    if len(sys.argv) >= 2:
+        path = sys.argv[2]
+    path_lst = [] if path.strip('/').strip() == '' else path.strip("/").split("/")
+
+    file_name_tree = py_literal_load (file_name_tree_fname)
+
+    curr_path = ''
+    node = file_name_tree['My Drive']
+    for dirname in path_lst:
+        curr_path = path_cat(curr_path, dirname)
+        if 'c' in node.keys() and dirname in node['c'].keys():
+            node = node['c'][dirname]
+        else:
+            print (f"File doesn't exist: {curr_path}")
+
+    recursive_name_duplicates_print(path, node)
 
 # TODO: Implement a diff function between a local folder and upstream
 
