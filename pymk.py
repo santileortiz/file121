@@ -1,11 +1,15 @@
 #!/usr/bin/python3
 from mkpy.utility import *
 import google_utility as google
+import hashlib
+
+import pdb
 
 dump_fname = 'full_file_dump'
 file_dict_fname = 'file_dict'
 file_tree_fname = 'file_tree'
 file_name_tree_fname = 'file_name_tree'
+local_file_name_tree_fname = 'local_file_name_tree'
 
 def default ():
     target = store_get ('last_snip', default='example_procedure')
@@ -176,6 +180,25 @@ def build_file_name_tree():
 
     py_literal_dump (root, file_name_tree_fname)
 
+def lookup_path (root, path_lst):
+    curr_path = ''
+    node = root
+    for dirname in path_lst:
+        curr_path = path_cat(curr_path, dirname)
+        if 'c' in node.keys() and dirname in node['c'].keys():
+            node = node['c'][dirname]
+        else:
+            print (f"File doesn't exist: {curr_path}")
+    return node
+
+def path_as_list(path):
+    # This is uglier than I wanted because, oddly enough
+    #       ''.split(' ') returns ['']
+    # but
+    #       ''.split() returns []
+    # why?...
+    return [] if path.strip(os.sep).strip() == '' else path.strip(os.sep).split(os.sep)
+
 def recursive_name_duplicates_print(path, node):
     if 'duplicateNames' in node.keys():
         print (path)
@@ -190,30 +213,110 @@ def find_name_duplicates():
     # folders to, and here we assume the passed path has the user's 'My Drive'
     # as root.
 
-    # This is uglier than I wanted because oddly enough
-    #       ''.split(' ') returns ['']
-    # but
-    #       ''.split() returns []
-    # why?...
     path = '/'
     if len(sys.argv) >= 2:
         path = sys.argv[2]
-    path_lst = [] if path.strip('/').strip() == '' else path.strip("/").split("/")
+    path_lst = path_as_list(path)
 
     file_name_tree = py_literal_load (file_name_tree_fname)
-
-    curr_path = ''
-    node = file_name_tree['My Drive']
-    for dirname in path_lst:
-        curr_path = path_cat(curr_path, dirname)
-        if 'c' in node.keys() and dirname in node['c'].keys():
-            node = node['c'][dirname]
-        else:
-            print (f"File doesn't exist: {curr_path}")
-
+    node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
-# TODO: Implement a diff function between a local folder and upstream
+def build_local_file_name_tree():
+    path = '.'
+    if len(sys.argv) > 2:
+        path = sys.argv[2]
+    path = os.path.abspath(path_resolve(path))
+
+    path_lst = []
+    local_file_name_tree = {}
+    for dirpath, dirnames, filenames in os.walk(path):
+        for dname in dirnames:
+            fpath = path_cat (dirpath, dname)
+            if os.path.islink(fpath):
+                print (f'Ignoring link to directory {path_cat(fpath)}')
+
+        path_lst = [dirname for dirname in dirpath.strip(os.sep).split(os.sep) if dirname != '.']
+        node = local_file_name_tree
+        for dirname in path_lst:
+            if 'c' not in node.keys():
+                node['c'] = {}
+
+            if dirname not in node['c'].keys():
+                node['c'][dirname] = {'name':dirname}
+
+            node = node['c'][dirname]
+        if 'c' not in node.keys():
+            node['c'] = {}
+
+        for fname in filenames:
+            hash_md5 = hashlib.md5()
+            with open(path_cat(dirpath, fname), "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_md5.update(chunk)
+
+            node['c'][fname] = {'name':fname, 'md5Checksum':hash_md5.hexdigest()}
+            print (path_cat(dirpath, fname))
+
+    py_literal_dump (local_file_name_tree, local_file_name_tree_fname)
+
+def recursive_tree_compare(path_lst, local, upstream):
+    if 'md5Checksum' in local.keys() and 'md5Checksum' in upstream.keys():
+        if local['md5Checksum'] != upstream['md5Checksum']:
+            print (f'Checksum mismatch: {os.sep.join(path_lst)}')
+
+    elif ('md5Checksum' in local.keys()) != ('md5Checksum' in upstream.keys()):
+        print (f'Type mismatch: {os.sep.join(path_lst)}')
+
+    if 'c' in local.keys() and 'c' in upstream.keys():
+        both = local['c'].keys() & upstream['c'].keys()
+        for fname in both:
+            local_f = local['c'][fname]
+            upstream_f = upstream['c'][fname]
+            recursive_tree_compare(path_lst + [fname], local_f, upstream_f)
+
+        for fname in upstream['c'].keys() - local['c'].keys():
+            print (f'Missing locally: {path_cat(os.sep.join(path_lst), fname)}')
+
+        for fname in local['c'].keys() - upstream['c'].keys():
+            print (f'Missing upstream: {path_cat(os.sep.join(path_lst), fname)}')
+
+    elif 'c' not in local.keys() and 'c' in upstream.keys():
+        for fname in upstream['c'].keys():
+            print (f'Missing locally: {path_cat(os.sep.join(path_lst), fname)}')
+
+    elif 'c' in local.keys() and 'c' not in upstream.keys():
+        for fname in local['c'].keys():
+            print (f'Missing upstream: {path_cat(os.sep.join(path_lst), fname)}')
+
+def recursive_name_tree_print(indent, node):
+    print (indent + node['name'])
+    if 'c' in node.keys():
+        for name, child in node['c'].items():
+            recursive_name_tree_print(indent + ' ', child)
+
+def diff():
+    if len(sys.argv) > 2:
+        local_path = os.path.abspath(path_resolve(sys.argv[2]))
+        upstream_path = sys.argv[3]
+    else:
+        print ('Missing arguments.')
+        return
+
+    local_tree = py_literal_load(local_file_name_tree_fname)
+    local_path_lst = path_as_list(local_path)
+    local_subtree = lookup_path (local_tree, local_path_lst)
+
+    upstream_tree = py_literal_load(file_name_tree_fname)
+    upstream_path_lst = path_as_list(upstream_path)
+    upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
+
+    #recursive_name_tree_print ('', local_subtree)
+    #print()
+    #recursive_name_tree_print ('', upstream_subtree)
+    #print()
+
+    recursive_tree_compare([], local_subtree, upstream_subtree)
 
 if __name__ == "__main__":
     # Everything above this line will be executed for each TAB press.
