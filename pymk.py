@@ -2,6 +2,10 @@
 from mkpy.utility import *
 import google_utility as google
 import hashlib
+import traceback
+
+import mimetypes
+from googleapiclient.http import MediaFileUpload
 
 import pdb
 
@@ -10,6 +14,7 @@ file_dict_fname = 'file_dict'
 file_tree_fname = 'file_tree'
 file_name_tree_fname = 'file_name_tree'
 local_file_name_tree_fname = 'local_file_name_tree'
+to_upload_fname = 'to_upload'
 
 def default ():
     target = store_get ('last_snip', default='example_procedure')
@@ -30,15 +35,16 @@ def sequential_file_dump ():
 
     files = []
     if is_in_progress:
-        print ('Detected partially complete dump, starting with from page token.')
-        parameters['nextPageToken'] = store_get('nextPageToken')
+        print ('Detected partially complete dump, starting with from stored page token.')
+        parameters['pageToken'] = store_get('nextPageToken')
         files = py_literal_load (dump_fname)
 
     while True:
         try:
             r = google.get('https://www.googleapis.com/drive/v3/files', params=parameters)
-        except:
+        except Exception as e:
             print ('Error while performing request to Google, dump can be restarted by re running the command.')
+            print (traceback.format_exc())
             store(progress_flag_name, True)
             break
 
@@ -137,6 +143,23 @@ def build_file_tree():
 
     py_literal_dump (roots, file_tree_fname)
 
+def tree_new_child(parent, child_id, child_name):
+    new_child = {'id': child_id, 'name': child_name}
+    tree_set_child (parent, new_child)
+    return new_child
+
+def tree_set_child(parent, child):
+    if 'c' not in parent.keys():
+        parent['c'] = {}
+
+    if child['name'] not in parent['c'].keys():
+        parent['c'][child['name']] = child
+    else:
+        if 'duplicateNames' not in parent['c'][child['name']].keys():
+            parent['c'][child['name']]['duplicateNames'] = []
+        parent['c'][child['name']]['duplicateNames'].append(child['id'])
+        print(f"Found file with existing name '{child['name']}' in directory '{parent['name']}': (old: {parent['c'][child['name']]['id']}) {child['id']}")
+
 def build_file_name_tree():
     """
     This transforms the tree from before that uses arrays for the children into
@@ -164,17 +187,7 @@ def build_file_name_tree():
         if 'parents' in f.keys():
             for parent_id in f['parents']:
                 if parent_id in file_dict.keys():
-                    parent = file_dict[parent_id]
-                    if 'c' not in parent.keys():
-                        parent['c'] = {}
-
-                    if f['name'] not in parent['c'].keys():
-                        parent['c'][f['name']] = f
-                    else:
-                        if 'duplicateNames' not in parent['c'][f['name']].keys():
-                            parent['c'][f['name']]['duplicateNames'] = []
-                        parent['c'][f['name']]['duplicateNames'].append(f['id'])
-                        print(f"Found file with existing name '{f['name']}' in directory '{parent['name']}': (old: {parent['c'][f['name']]['id']}) {f['id']}")
+                    tree_set_child (parent, f)
         else:
             root[f['name']] = f
 
@@ -317,6 +330,85 @@ def diff():
     #print()
 
     recursive_tree_compare([], local_subtree, upstream_subtree)
+
+def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
+    if not os.path.isfile(local_abs_path):
+        print (f"Upload failed because it's not a file: {local_abs_path}")
+        return
+
+    # 1. Follow upstream tree until we find something that doesn't exist.
+    path_lst = path_as_list(upstream_abs_path)
+    directory_path = path_lst[:-1]
+    node = upstream_root
+    missing_directory = False
+    missing_idx = 0
+
+    for i, dirname in enumerate(directory_path):
+        if 'c' in node.keys() and dirname in node['c'].keys():
+            node = node['c'][dirname]
+        else:
+            missing_directory = True
+            missing_idx = i
+            break
+
+    # 2. Create missing directories
+    parent_lst = [node['id']]
+    if missing_directory:
+        for dir_name in directory_path[missing_idx:]:
+            metadata = {
+                'name': dir_name,
+                'parents': parent_lst,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            create_folder = service.files().create(body=metadata,
+                                                   fields='id').execute()
+            node = tree_new_child (node, create_folder.get('id', []), dir_name)
+            parent_lst[0] = node['id']
+        print (f"In '{os.sep.join(directory_path[:missing_idx])}' created folder(s): {os.sep.join(directory_path[missing_idx:])}")
+
+    # 3. Upload the file
+    file_metadata = {'name': path_lst[-1], 'parents': parent_lst}
+    data = MediaFileUpload(local_abs_path,
+            mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0])
+    service.files().create(body=file_metadata,
+            media_body=data).execute()
+    print (f"{local_abs_path} -> {upstream_abs_path}")
+
+def upload():
+    if len(sys.argv) > 2:
+        local_path = os.path.abspath(path_resolve(sys.argv[2]))
+        upstream_path = sys.argv[3]
+    else:
+        print ('Missing arguments.')
+        return
+
+    upstream_tree = py_literal_load(file_name_tree_fname)
+    upstream_path_lst = path_as_list(upstream_path)
+    upstream_root = upstream_tree['My Drive']
+
+    with open(to_upload_fname, "r") as f:
+        file_lst = f.read().strip('\n').split('\n')
+
+    service = google.get_service()
+    for f_path in file_lst:
+        upstream_abs_path = path_cat(upstream_path, f_path)
+        local_abs_path = path_cat(local_path, f_path)
+
+        if os.path.isfile(local_abs_path):
+            upload_file (service, local_abs_path, upstream_root, upstream_abs_path)
+
+        elif os.path.isdir(local_abs_path):
+            for dirpath, dirnames, filenames in os.walk(local_abs_path):
+                if dirpath.find(local_abs_path) == 0:
+                    upstream_base = dirpath[len(local_abs_path):]
+                    for fname in filenames:
+                        upstream_file_path = path_cat (upstream_abs_path, upstream_base, fname)
+                        upload_file (service, path_cat(dirpath, fname), upstream_root, upstream_file_path)
+                else:
+                    print (f"Error creating upstream path for: {dirpath} (local: {local_abs_path})")
+
+        else:
+            print (f'Skipping unknown file type (link?): {local_abs_path}')
 
 if __name__ == "__main__":
     # Everything above this line will be executed for each TAB press.

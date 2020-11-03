@@ -10,8 +10,13 @@ import socketserver
 import urllib.parse as urlparse
 from urllib.parse import parse_qs
 
+
 # TODO: How would things change if I use this?
 #from google_auth_oauthlib.flow import Flow
+import pickle
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
 # Client secret configuration file, downloaded from the Google Console
 client_secret_fname = 'client_secret.json'
@@ -22,7 +27,7 @@ token_fname = '.token'
 # Constants specific to Google's OAuth implementation
 authorization_base_url = 'https://accounts.google.com/o/oauth2/v2/auth'
 token_url = 'https://oauth2.googleapis.com/token'
-scope = ['https://www.googleapis.com/auth/drive.metadata.readonly']
+scope = ['https://www.googleapis.com/auth/drive']
 
 redirect_port = 4538
 authorization_code = None
@@ -118,3 +123,23 @@ def get(*args, **kwargs):
         r = __google_get(*args, **kwargs)
 
     return r
+
+def get_service():
+    creds = None
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'client_secret.json', scope)
+            creds = flow.run_local_server(port=0)
+
+        # Dump credentials
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+
+    return build('drive', 'v3', credentials=creds)
