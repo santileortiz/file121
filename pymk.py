@@ -37,7 +37,7 @@ def sequential_file_dump ():
     if is_in_progress:
         print ('Detected partially complete dump, starting with from stored page token.')
         parameters['pageToken'] = store_get('nextPageToken')
-        files = py_literal_load (dump_fname)
+        files = pickle_load (dump_fname)
 
     while True:
         try:
@@ -64,7 +64,7 @@ def sequential_file_dump ():
             store('nextPageToken', nextPage_token)
             parameters['pageToken'] = nextPage_token
 
-    py_literal_dump (files, dump_fname)
+    pickle_dump (files, dump_fname)
     print (f'Total: {len(files)}')
 
 def tree_file_dump ():
@@ -78,13 +78,13 @@ def tree_file_dump ():
 
     files = []
 
-    py_literal_dump (files, 'full_file_dump')
+    pickle_dump (files, 'full_file_dump')
     print (f'Total: {len(files)}')
 
 def build_file_dict():
     file_dict = {}
 
-    files = py_literal_load (dump_fname)
+    files = pickle_load (dump_fname)
     for f in files:
         new_file_info = {key: value for key, value in f.items()}
         f_id = f['id']
@@ -116,7 +116,7 @@ def build_file_dict():
                     file_dict[parent_id] = r
                     print (f'Added ghost file {parent_id}')
 
-    py_literal_dump (file_dict, file_dict_fname)
+    pickle_dump (file_dict, file_dict_fname)
     print (f'Created file dictionay: {file_dict_fname}')
 
 def recursive_tree_print(indent, node):
@@ -126,7 +126,7 @@ def recursive_tree_print(indent, node):
             recursive_tree_print(indent + ' ', child)
 
 def build_file_tree():
-    file_dict = py_literal_load (file_dict_fname)
+    file_dict = pickle_load (file_dict_fname)
 
     roots = []
     for f_id, f in file_dict.items():
@@ -141,7 +141,7 @@ def build_file_tree():
         else:
             roots.append(f)
 
-    py_literal_dump (roots, file_tree_fname)
+    pickle_dump (roots, file_tree_fname)
 
 def tree_new_child(parent, child_id, child_name):
     new_child = {'id': child_id, 'name': child_name}
@@ -180,7 +180,7 @@ def build_file_name_tree():
     # TODO: Implement this as a tree traversal
     # TODO: Implement a version of this that considers names equal in a case
     # insensitive way.
-    file_dict = py_literal_load (file_dict_fname)
+    file_dict = pickle_load (file_dict_fname)
 
     root = {}
     for f_id, f in file_dict.items():
@@ -191,7 +191,7 @@ def build_file_name_tree():
         else:
             root[f['name']] = f
 
-    py_literal_dump (root, file_name_tree_fname)
+    pickle_dump (root, file_name_tree_fname)
 
 def lookup_path (root, path_lst):
     curr_path = ''
@@ -231,7 +231,7 @@ def find_name_duplicates():
         path = sys.argv[2]
     path_lst = path_as_list(path)
 
-    file_name_tree = py_literal_load (file_name_tree_fname)
+    file_name_tree = pickle_load (file_name_tree_fname)
     node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
@@ -271,7 +271,7 @@ def build_local_file_name_tree():
             node['c'][fname] = {'name':fname, 'md5Checksum':hash_md5.hexdigest()}
             print (path_cat(dirpath, fname))
 
-    py_literal_dump (local_file_name_tree, local_file_name_tree_fname)
+    pickle_dump (local_file_name_tree, local_file_name_tree_fname)
 
 def recursive_tree_compare(path_lst, local, upstream):
     if 'md5Checksum' in local.keys() and 'md5Checksum' in upstream.keys():
@@ -316,11 +316,11 @@ def diff():
         print ('Missing arguments.')
         return
 
-    local_tree = py_literal_load(local_file_name_tree_fname)
+    local_tree = pickle_load(local_file_name_tree_fname)
     local_path_lst = path_as_list(local_path)
     local_subtree = lookup_path (local_tree, local_path_lst)
 
-    upstream_tree = py_literal_load(file_name_tree_fname)
+    upstream_tree = pickle_load(file_name_tree_fname)
     upstream_path_lst = path_as_list(upstream_path)
     upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
 
@@ -382,7 +382,7 @@ def upload():
         print ('Missing arguments.')
         return
 
-    upstream_tree = py_literal_load(file_name_tree_fname)
+    upstream_tree = pickle_load(file_name_tree_fname)
     upstream_path_lst = path_as_list(upstream_path)
     upstream_root = upstream_tree['My Drive']
 

@@ -1,4 +1,4 @@
-import sys, subprocess, os, ast, shutil, platform, json
+import sys, subprocess, os, ast, shutil, platform, json, pickle
 
 import importlib.util, inspect, pathlib, filecmp
 
@@ -385,6 +385,14 @@ def warn (s):
     color = '\033[1;33m\033[K'
     default_color = '\033[m\033[K'
     print (color+s+default_color)
+
+def pickle_load(fname):
+    with open (fname, 'rb') as f:
+        return pickle.load(f)
+
+def pickle_dump(obj, fname):
+    with open (fname, 'wb') as f:
+        pickle.dump(obj, f)
 
 def py_literal_load(fname):
     with open (fname, 'r') as f:
