@@ -187,7 +187,7 @@ def build_file_name_tree():
         if 'parents' in f.keys():
             for parent_id in f['parents']:
                 if parent_id in file_dict.keys():
-                    tree_set_child (parent, f)
+                    tree_set_child (file_dict[parent_id], f)
         else:
             root[f['name']] = f
 
@@ -221,6 +221,10 @@ def recursive_name_duplicates_print(path, node):
             recursive_name_duplicates_print(path_cat(path, name), child)
 
 def find_name_duplicates():
+    """
+    This snip receives an upstream path of a subtree and it prints all distinct
+    files with duplicate names.
+    """
     # NOTE: It's possible that we get duplicates while building the file name
     # tree but not here. That's because the full file dump contains shared
     # folders to, and here we assume the passed path has the user's 'My Drive'
