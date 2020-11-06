@@ -9,7 +9,6 @@ from googleapiclient.http import MediaFileUpload
 
 import pdb
 
-dump_fname = 'full_file_dump'
 file_dict_fname = 'file_dict'
 file_tree_fname = 'file_tree'
 file_name_tree_fname = 'file_name_tree'
@@ -23,8 +22,8 @@ def default ():
 def sequential_file_dump ():
     """
     This requests all file information from google drive and dumps it into a
-    file as a python literal list. It gets enough information for us to compare
-    the upstream file with one downstream.
+    file representing a dictionary indexed by id. It gets enough information
+    for us to compare the upstream file with one downstream.
     """
 
     restart = get_cli_bool_opt('--restart')
@@ -33,11 +32,11 @@ def sequential_file_dump ():
 
     parameters = {'fields':'nextPageToken,files(id,name,md5Checksum,parents)', 'pageSize':1000, 'q':'trashed = false'}
 
-    files = []
+    files = {}
     if is_in_progress:
         print ('Detected partially complete dump, starting with from stored page token.')
         parameters['pageToken'] = store_get('nextPageToken')
-        files = pickle_load (dump_fname)
+        files = pickle_load (file_dict_fname)
 
     while True:
         try:
@@ -49,8 +48,14 @@ def sequential_file_dump ():
             break
 
         if 'files' in r.keys():
-            files += r['files']
-            print (f'Received: {len(r["files"])} ({files[-1]["id"] if len(files) > 0 else ""})')
+            for f in r['files']:
+                f_id = f['id']
+                if f_id in files:
+                    # This should never happen
+                    print (f'Found repeated ID {f_id}')
+                files[f_id] = f
+
+            print (f'Received: {len(r["files"])} ({r["files"][-1]["id"] if len(files) > 0 else ""})')
         else:
             print (f'Received response without files.')
             print (r)
@@ -64,7 +69,42 @@ def sequential_file_dump ():
             store('nextPageToken', nextPage_token)
             parameters['pageToken'] = nextPage_token
 
-    pickle_dump (files, dump_fname)
+
+
+    # For some reason, the sequential file dump still misses some parents. Here
+    # we iterate the dump and check that all parent IDs are resolved.  I even
+    # tried setting to true 'includeItemsFromAllDrives' and
+    # 'supportsAllDrives', it didn't work.
+    ghost_file_ids = set()
+    for f_id, f in files.items():
+        if 'parents' in f.keys():
+            for parent_id in f['parents']:
+                if parent_id not in files.keys():
+                    ghost_file_ids.add(parent_id)
+
+    # Get data of all ghost files and their ancestors
+    #
+    # TODO: Maybe these files should be specially marked, like "ghost" files?.
+    while len(ghost_file_ids) > 0:
+        f_id = ghost_file_ids.pop()
+        try:
+            f = google.get(f'https://www.googleapis.com/drive/v3/files/{f_id}')
+        except:
+            print ('Failed to get parent file {f_id}')
+            # TODO: Maybe if this happens, the correct solution is
+            # to remove the parent reference from the file, so the
+            # tree can be built "normally"?. It's possible we will
+            # end up adding stuff to the root that's not supposed
+            # to be there...
+
+        files[f_id] = f
+        if 'parents' in f.keys():
+            for parent_id in f['parents']:
+                if parent_id not in files.keys() and parent_id not in ghost_file_ids:
+                    ghost_file_ids.add(parent_id)
+        print (f'Added ghost file {f_id}')
+
+    pickle_dump (files, file_dict_fname)
     print (f'Total: {len(files)}')
 
 def tree_file_dump ():
@@ -80,44 +120,6 @@ def tree_file_dump ():
 
     pickle_dump (files, 'full_file_dump')
     print (f'Total: {len(files)}')
-
-def build_file_dict():
-    file_dict = {}
-
-    files = pickle_load (dump_fname)
-    for f in files:
-        new_file_info = {key: value for key, value in f.items()}
-        f_id = f['id']
-        if f_id in file_dict:
-            # This should never happen
-            print (f'Found repeated ID {f_id}')
-        file_dict[f_id] = new_file_info
-    
-    # For some reason, the sequential file dump still misses some parents. Here
-    # we iterate the dump and check that all parent IDs are resolved.  I even
-    # tried setting to true 'includeItemsFromAllDrives' and
-    # 'supportsAllDrives', it didn't work.
-    #
-    # TODO: Maybe these files should be specially marked, like "ghost" files?.
-    for f in files:
-        if 'parents' in f.keys():
-            for parent_id in f['parents']:
-                if parent_id not in file_dict.keys():
-                    try:
-                        r = google.get(f'https://www.googleapis.com/drive/v3/files/{parent_id}')
-                    except:
-                        print ('Failed to get parent file {parent_id}')
-                        # TODO: Maybe if this happens, the correct solution is
-                        # to remove the parent reference from the file, so the
-                        # tree can be built "normally"?. It's possible we will
-                        # end up adding stuff to the root that's not supposed
-                        # to be there...
-
-                    file_dict[parent_id] = r
-                    print (f'Added ghost file {parent_id}')
-
-    pickle_dump (file_dict, file_dict_fname)
-    print (f'Created file dictionay: {file_dict_fname}')
 
 def recursive_tree_print(indent, node):
     print (indent + node['name'])
