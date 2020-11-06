@@ -340,14 +340,41 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
         print (f"Upload failed because it's not a file: {local_abs_path}")
         return
 
-    # 1. Follow upstream tree until we find something that doesn't exist.
+    # Find parent in upstream tree
+    error = None
     path_lst = path_as_list(upstream_abs_path)
     directory_path = path_lst[:-1]
+    node = upstream_root
+
+    for dirname in directory_path:
+        if 'c' in node.keys() and dirname in node['c'].keys():
+            node = node['c'][dirname]
+        else:
+            error = f"Can't upload file because directory '{dirname}' doesn't exist: {upstream_abs_path}\n"
+            break
+
+    if error == None:
+        file_metadata = {'name': path_lst[-1], 'parents': parent_lst}
+        data = MediaFileUpload(local_abs_path,
+                mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0])
+        service.files().create(body=file_metadata,
+                media_body=data).execute()
+        print (f"{local_abs_path} -> {upstream_abs_path}")
+
+    return error
+
+def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_abs_path):
+    if not os.path.isdir(local_abs_path):
+        print (f"Failed to create directory upstream, because it's not a directory locally: {local_abs_path}")
+        return
+
+    # Follow upstream tree until we find something that doesn't exist.
+    path_lst = path_as_list(upstream_abs_path)
     node = upstream_root
     missing_directory = False
     missing_idx = 0
 
-    for i, dirname in enumerate(directory_path):
+    for i, dirname in enumerate(path_lst):
         if 'c' in node.keys() and dirname in node['c'].keys():
             node = node['c'][dirname]
         else:
@@ -355,10 +382,10 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
             missing_idx = i
             break
 
-    # 2. Create missing directories
+    # Create missing directories
     parent_lst = [node['id']]
     if missing_directory:
-        for dir_name in directory_path[missing_idx:]:
+        for dir_name in path_lst[missing_idx:]:
             metadata = {
                 'name': dir_name,
                 'parents': parent_lst,
@@ -368,15 +395,7 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
                                                    fields='id').execute()
             node = tree_new_child (node, create_folder.get('id', []), dir_name)
             parent_lst[0] = node['id']
-        print (f"In '{os.sep.join(directory_path[:missing_idx])}' created folder(s): {os.sep.join(directory_path[missing_idx:])}")
-
-    # 3. Upload the file
-    file_metadata = {'name': path_lst[-1], 'parents': parent_lst}
-    data = MediaFileUpload(local_abs_path,
-            mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0])
-    service.files().create(body=file_metadata,
-            media_body=data).execute()
-    print (f"{local_abs_path} -> {upstream_abs_path}")
+        print (f"In '{os.sep.join(path_lst[:missing_idx])}' created folder(s): {os.sep.join(path_lst[missing_idx:])}")
 
 def upload():
     if len(sys.argv) > 2:
@@ -393,6 +412,7 @@ def upload():
     with open(to_upload_fname, "r") as f:
         file_lst = f.read().strip('\n').split('\n')
 
+    msg = ''
     service = google.get_service()
     for f_path in file_lst:
         upstream_abs_path = path_cat(upstream_path, f_path)
@@ -403,16 +423,35 @@ def upload():
 
         elif os.path.isdir(local_abs_path):
             for dirpath, dirnames, filenames in os.walk(local_abs_path):
+                for dname in dirnames:
+                    fpath = path_cat (dirpath, dname)
+                    if os.path.islink(fpath):
+                        msg += f'Ignoring link to directory {path_cat(fpath)}\n'
+                        print(f'Ignoring link to directory {path_cat(fpath)}\n')
+
                 if dirpath.find(local_abs_path) == 0:
                     upstream_base = dirpath[len(local_abs_path):]
+
+                    upstream_dirpath = path_cat (upstream_abs_path, upstream_base)
+                    ensure_upstream_dir_path (service, dirpath, upstream_root, upstream_dirpath)
+
                     for fname in filenames:
-                        upstream_file_path = path_cat (upstream_abs_path, upstream_base, fname)
-                        upload_file (service, path_cat(dirpath, fname), upstream_root, upstream_file_path)
+                        upstream_file_path = path_cat (upstream_dirpath, fname)
+                        error = upload_file (service, path_cat(dirpath, fname), upstream_root, upstream_file_path)
+                        if error != None:
+                            msg += error
+
                 else:
+                    msg += f"Error creating upstream path for: {dirpath} (local: {local_abs_path})\n"
                     print (f"Error creating upstream path for: {dirpath} (local: {local_abs_path})")
 
         else:
+            msg += f'Skipping unknown file type (link?): {local_abs_path}\n'
             print (f'Skipping unknown file type (link?): {local_abs_path}')
+
+    # Because the output can be very long, summarize all messages at
+    # the end
+    print (msg)
 
 if __name__ == "__main__":
     # Everything above this line will be executed for each TAB press.
