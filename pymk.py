@@ -30,8 +30,9 @@ def sequential_file_dump ():
     progress_flag_name = 'sequentialTraversalInProgress'
     is_in_progress = store_get(progress_flag_name, default=False) and not restart
 
-    parameters = {'fields':'nextPageToken,files(id,name,md5Checksum,parents)', 'pageSize':1000, 'q':'trashed = false'}
+    parameters = {'fields':'nextPageToken,files(id,mimeType,name,md5Checksum,parents)', 'pageSize':1000, 'q':'trashed = false'}
 
+    success = False
     files = {}
     if is_in_progress:
         print ('Detected partially complete dump, starting with from stored page token.')
@@ -63,6 +64,7 @@ def sequential_file_dump ():
         if 'nextPageToken' not in r.keys():
             # Successfully reached the end of the full file list
             store(progress_flag_name, False)
+            success = True
             break
         else:
             nextPage_token = r['nextPageToken']
@@ -70,39 +72,39 @@ def sequential_file_dump ():
             parameters['pageToken'] = nextPage_token
 
 
+    if success:
+        # For some reason, the sequential file dump still misses some parents. Here
+        # we iterate the dump and check that all parent IDs are resolved.  I even
+        # tried setting to true 'includeItemsFromAllDrives' and
+        # 'supportsAllDrives', it didn't work.
+        ghost_file_ids = set()
+        for f_id, f in files.items():
+            if 'parents' in f.keys():
+                for parent_id in f['parents']:
+                    if parent_id not in files.keys():
+                        ghost_file_ids.add(parent_id)
 
-    # For some reason, the sequential file dump still misses some parents. Here
-    # we iterate the dump and check that all parent IDs are resolved.  I even
-    # tried setting to true 'includeItemsFromAllDrives' and
-    # 'supportsAllDrives', it didn't work.
-    ghost_file_ids = set()
-    for f_id, f in files.items():
-        if 'parents' in f.keys():
-            for parent_id in f['parents']:
-                if parent_id not in files.keys():
-                    ghost_file_ids.add(parent_id)
+        # Get data of all ghost files and their ancestors
+        #
+        # TODO: Maybe these files should be specially marked, like "ghost" files?.
+        while len(ghost_file_ids) > 0:
+            f_id = ghost_file_ids.pop()
+            try:
+                f = google.get(f'https://www.googleapis.com/drive/v3/files/{f_id}')
+            except:
+                print ('Failed to get parent file {f_id}')
+                # TODO: Maybe if this happens, the correct solution is
+                # to remove the parent reference from the file, so the
+                # tree can be built "normally"?. It's possible we will
+                # end up adding stuff to the root that's not supposed
+                # to be there...
 
-    # Get data of all ghost files and their ancestors
-    #
-    # TODO: Maybe these files should be specially marked, like "ghost" files?.
-    while len(ghost_file_ids) > 0:
-        f_id = ghost_file_ids.pop()
-        try:
-            f = google.get(f'https://www.googleapis.com/drive/v3/files/{f_id}')
-        except:
-            print ('Failed to get parent file {f_id}')
-            # TODO: Maybe if this happens, the correct solution is
-            # to remove the parent reference from the file, so the
-            # tree can be built "normally"?. It's possible we will
-            # end up adding stuff to the root that's not supposed
-            # to be there...
-
-        files[f_id] = f
-        if 'parents' in f.keys():
-            for parent_id in f['parents']:
-                if parent_id not in files.keys() and parent_id not in ghost_file_ids:
-                    ghost_file_ids.add(parent_id)
-        print (f'Added ghost file {f_id}')
+            files[f_id] = f
+            if 'parents' in f.keys():
+                for parent_id in f['parents']:
+                    if parent_id not in files.keys() and parent_id not in ghost_file_ids:
+                        ghost_file_ids.add(parent_id)
+            print (f'Added ghost file {f_id}')
 
     pickle_dump (files, file_dict_fname)
     print (f'Total: {len(files)}')
@@ -186,6 +188,12 @@ def build_file_name_tree():
 
     root = {}
     for f_id, f in file_dict.items():
+        # Ensure all directories have a children dictionary, even if it's
+        # empty. Currently when computing the diff we distinguish between files
+        # and directories by the presence/abscence of this value.
+        if f['mimeType'] == "application/vnd.google-apps.folder" and 'c' not in f.keys():
+            f['c'] = {}
+
         if 'parents' in f.keys():
             for parent_id in f['parents']:
                 if parent_id in file_dict.keys():
@@ -241,12 +249,7 @@ def find_name_duplicates():
     node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
-def build_local_file_name_tree():
-    path = '.'
-    if len(sys.argv) > 2:
-        path = sys.argv[2]
-    path = os.path.abspath(path_resolve(path))
-
+def get_local_file_tree(path):
     path_lst = []
     local_file_name_tree = {}
     for dirpath, dirnames, filenames in os.walk(path):
@@ -274,25 +277,42 @@ def build_local_file_name_tree():
                 for chunk in iter(lambda: f.read(4096), b""):
                     hash_md5.update(chunk)
 
-            node['c'][fname] = {'name':fname, 'md5Checksum':hash_md5.hexdigest()}
-            print (path_cat(dirpath, fname))
+            checksum = hash_md5.hexdigest()
+            node['c'][fname] = {'name':fname, 'md5Checksum':checksum}
+            print (f'{checksum} - {path_cat(dirpath, fname)}')
 
+    return local_file_name_tree
+
+def build_local_file_name_tree():
+    path = '.'
+    if len(sys.argv) > 2:
+        path = sys.argv[2]
+    path = os.path.abspath(path_resolve(path))
+
+    local_file_name_tree = get_local_file_tree(path)
     pickle_dump (local_file_name_tree, local_file_name_tree_fname)
 
 def recursive_tree_compare(path_lst, local, upstream):
+    checksum_count = 0
     if 'md5Checksum' in local.keys() and 'md5Checksum' in upstream.keys():
         if local['md5Checksum'] != upstream['md5Checksum']:
             print (f'Checksum mismatch: {os.sep.join(path_lst)}')
+        else:
+            checksum_count += 1
 
     elif ('md5Checksum' in local.keys()) != ('md5Checksum' in upstream.keys()):
         print (f'Type mismatch: {os.sep.join(path_lst)}')
 
+    children_count = 0
     if 'c' in local.keys() and 'c' in upstream.keys():
         both = local['c'].keys() & upstream['c'].keys()
+        children_count += len(both)
         for fname in both:
             local_f = local['c'][fname]
             upstream_f = upstream['c'][fname]
-            recursive_tree_compare(path_lst + [fname], local_f, upstream_f)
+            l_checksum_count, l_children_count = recursive_tree_compare(path_lst + [fname], local_f, upstream_f)
+            checksum_count += l_checksum_count
+            children_count += l_children_count
 
         for fname in upstream['c'].keys() - local['c'].keys():
             print (f'Missing locally: {path_cat(os.sep.join(path_lst), fname)}')
@@ -308,11 +328,35 @@ def recursive_tree_compare(path_lst, local, upstream):
         for fname in local['c'].keys():
             print (f'Missing upstream: {path_cat(os.sep.join(path_lst), fname)}')
 
+    return checksum_count, children_count
+
 def recursive_name_tree_print(indent, node):
     print (indent + node['name'])
     if 'c' in node.keys():
         for name, child in node['c'].items():
             recursive_name_tree_print(indent + ' ', child)
+
+def recursive_tree_print(path, node):
+    print (path_cat(path, node['name']))
+    if 'c' in node.keys():
+        for name, child in node['c'].items():
+            recursive_tree_print(path_cat(path, node['name']), child)
+
+def recursive_tree_size(path, node):
+    count = 0
+    file_count = 0
+    file_list = []
+    if 'c' in node.keys():
+        count += len(node['c'])
+        for name, child in node['c'].items():
+            l_count, l_file_count, l_file_list = recursive_tree_size(path_cat(path, node['name']), child)
+            count += l_count
+            file_count += l_file_count
+            file_list += l_file_list
+    else:
+        file_list.append(path_cat(path, node['name']))
+        file_count += 1
+    return count, file_count, file_list
 
 def diff():
     if len(sys.argv) > 2:
@@ -322,7 +366,11 @@ def diff():
         print ('Missing arguments.')
         return
 
-    local_tree = pickle_load(local_file_name_tree_fname)
+    if get_cli_bool_opt('--build-local'):
+        local_tree = get_local_file_tree(local_path)
+        print()
+    else:
+        local_tree = pickle_load(local_file_name_tree_fname)
     local_path_lst = path_as_list(local_path)
     local_subtree = lookup_path (local_tree, local_path_lst)
 
@@ -330,12 +378,26 @@ def diff():
     upstream_path_lst = path_as_list(upstream_path)
     upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
 
-    #recursive_name_tree_print ('', local_subtree)
+    #recursive_tree_print ('', local_subtree)
     #print()
-    #recursive_name_tree_print ('', upstream_subtree)
+    #recursive_tree_print ('', upstream_subtree)
     #print()
 
-    recursive_tree_compare([], local_subtree, upstream_subtree)
+    checksum_count, children_count = recursive_tree_compare([], local_subtree, upstream_subtree)
+    print ()
+
+    print (f'Successful checksum comparisons: {checksum_count}')
+    print (f'Children name comparisons: {children_count}')
+
+    children_count, file_count, file_list = recursive_tree_size('', upstream_subtree)
+    print (f'Upstream subtree size: {file_count}/{children_count}')
+    #file_list.sort()
+    #print ('\n'.join(file_list))
+
+    children_count, file_count, file_list = recursive_tree_size('', local_subtree)
+    print (f'Local subtree size: {file_count}/{children_count}')
+    #file_list.sort()
+    #print ('\n'.join(file_list))
 
 def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
     if not os.path.isfile(local_abs_path):
@@ -356,7 +418,7 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
             break
 
     if error == None:
-        file_metadata = {'name': path_lst[-1], 'parents': parent_lst}
+        file_metadata = {'name': path_lst[-1], 'parents': [node['id']]}
         data = MediaFileUpload(local_abs_path,
                 mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0])
         service.files().create(body=file_metadata,
