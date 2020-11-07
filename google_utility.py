@@ -106,7 +106,15 @@ def __google_get(*args, **kwargs):
 
 def get(*args, **kwargs):
     r = None
-    
+
+    # Sometimes requests get stuck forever, the stack trace when terminating
+    # looks a lot like the one in [1] according to [2] calls don't timeout by
+    # default, so we ensure we have a timeout here.
+    #
+    # [1]: https://stackoverflow.com/questions/54227770/request-get-is-getting-stuck/54257352
+    # [2]: https://requests.readthedocs.io/en/master/user/advanced/#timeouts
+    kwargs['timeout'] = 150
+
     try:
         r = __google_get(*args, **kwargs)
 
