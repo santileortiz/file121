@@ -9,11 +9,14 @@ from googleapiclient.http import MediaFileUpload
 
 import pdb
 
+# TODO: Unify file_dict and file_tree into a single file. Create a common type
+# of datastructure for local and upstream tree files.
 file_dict_fname = 'file_dict'
 file_tree_fname = 'file_tree'
-file_name_tree_fname = 'file_name_tree'
-local_file_name_tree_fname = 'local_file_name_tree'
+local_file_tree_fname = 'local_file_tree'
 to_upload_fname = 'to_upload'
+
+bindings_prop = 'bindings'
 
 def default ():
     target = store_get ('last_snip', default='example_procedure')
@@ -123,34 +126,17 @@ def tree_file_dump ():
     pickle_dump (files, 'full_file_dump')
     print (f'Total: {len(files)}')
 
-def recursive_tree_print(indent, node):
+def recursive_tree_print(node, indent=''):
     print (indent + node['name'])
     if 'c' in node.keys():
         for child in node['c']:
-            recursive_tree_print(indent + ' ', child)
+            recursive_tree_print(child, indent=indent + ' ')
 
-def build_file_tree():
-    file_dict = pickle_load (file_dict_fname)
-
-    roots = []
-    for f_id, f in file_dict.items():
-        if 'parents' in f.keys():
-            for parent_id in f['parents']:
-                if parent_id in file_dict.keys():
-                    parent = file_dict[parent_id]
-                    if 'c' not in parent.keys():
-                        parent['c'] = []
-
-                    parent['c'].append(f)
-        else:
-            roots.append(f)
-
-    pickle_dump (roots, file_tree_fname)
-
-def tree_new_child(parent, child_id, child_name):
-    new_child = {'id': child_id, 'name': child_name}
-    tree_set_child (parent, new_child)
-    return new_child
+def recursive_path_tree_print(node, path=''):
+    print (path_cat(path, node['name']))
+    if 'c' in node.keys():
+        for name, child in node['c'].items():
+            recursive_path_tree_print(child, path=path_cat(path, node['name']))
 
 def tree_set_child(parent, child):
     if 'c' not in parent.keys():
@@ -163,6 +149,11 @@ def tree_set_child(parent, child):
             parent['c'][child['name']]['duplicateNames'] = []
         parent['c'][child['name']]['duplicateNames'].append(child['id'])
         print(f"Found file with existing name '{child['name']}' in directory '{parent['name']}': (old: {parent['c'][child['name']]['id']}) {child['id']}")
+
+def tree_new_child(parent, child_id, child_name):
+    new_child = {'id': child_id, 'name': child_name}
+    tree_set_child (parent, new_child)
+    return new_child
 
 def build_file_name_tree():
     """
@@ -201,7 +192,7 @@ def build_file_name_tree():
         else:
             root[f['name']] = f
 
-    pickle_dump (root, file_name_tree_fname)
+    pickle_dump (root, file_tree_fname)
 
 def lookup_path (root, path_lst):
     curr_path = ''
@@ -245,13 +236,12 @@ def find_name_duplicates():
         path = sys.argv[2]
     path_lst = path_as_list(path)
 
-    file_name_tree = pickle_load (file_name_tree_fname)
+    file_name_tree = pickle_load (file_tree_fname)
     node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
-def get_local_file_tree(path):
+def get_local_file_tree(path, local_file_name_tree = {}):
     path_lst = []
-    local_file_name_tree = {}
     for dirpath, dirnames, filenames in os.walk(path):
         for dname in dirnames:
             fpath = path_cat (dirpath, dname)
@@ -284,120 +274,224 @@ def get_local_file_tree(path):
     return local_file_name_tree
 
 def build_local_file_name_tree():
-    path = '.'
     if len(sys.argv) > 2:
         path = sys.argv[2]
-    path = os.path.abspath(path_resolve(path))
+        path = os.path.abspath(path_resolve(path))
 
-    local_file_name_tree = get_local_file_tree(path)
-    pickle_dump (local_file_name_tree, local_file_name_tree_fname)
+        local_file_name_tree = get_local_file_tree(path)
+        pickle_dump (local_file_name_tree, local_file_tree_fname)
 
-def recursive_tree_compare(path_lst, local, upstream):
+    else:
+        local_file_name_tree = {}
+        for upstream_path, local_path in store_get(bindings_prop).items():
+            info (f'L {local_path}')
+            get_local_file_tree (local_path, local_file_name_tree=local_file_name_tree)
+
+        pickle_dump (local_file_name_tree, local_file_tree_fname)
+
+def recursive_tree_compare(local, upstream, path_lst=[]):
+    missing_upstream = []
+    missing_locally = []
+    different = []
     checksum_count = 0
+    children_count = 0
+
+    # NOTE: Files can be different in 2 ways. Their content may be different
+    # (checksum mismatch) or maybe their types are different (type mismatch)
+    # and we are trying to compare a file with a directory.
     if 'md5Checksum' in local.keys() and 'md5Checksum' in upstream.keys():
         if local['md5Checksum'] != upstream['md5Checksum']:
-            print (f'Checksum mismatch: {os.sep.join(path_lst)}')
+            different.append (os.sep.join(path_lst))
         else:
             checksum_count += 1
-
     elif ('md5Checksum' in local.keys()) != ('md5Checksum' in upstream.keys()):
-        print (f'Type mismatch: {os.sep.join(path_lst)}')
+        different.append (os.sep.join(path_lst))
 
-    children_count = 0
     if 'c' in local.keys() and 'c' in upstream.keys():
         both = local['c'].keys() & upstream['c'].keys()
         children_count += len(both)
         for fname in both:
             local_f = local['c'][fname]
             upstream_f = upstream['c'][fname]
-            l_checksum_count, l_children_count = recursive_tree_compare(path_lst + [fname], local_f, upstream_f)
+
+            l_missing_upstream, l_missing_locally, l_different, l_checksum_count, l_children_count = \
+                recursive_tree_compare(local_f, upstream_f, path_lst=path_lst + [fname])
+            missing_upstream += l_missing_upstream
+            missing_locally += l_missing_locally
+            different += l_different
             checksum_count += l_checksum_count
             children_count += l_children_count
 
         for fname in upstream['c'].keys() - local['c'].keys():
-            print (f'Missing locally: {path_cat(os.sep.join(path_lst), fname)}')
+            missing_locally.append(path_cat(os.sep.join(path_lst), fname))
 
         for fname in local['c'].keys() - upstream['c'].keys():
-            print (f'Missing upstream: {path_cat(os.sep.join(path_lst), fname)}')
+            missing_upstream.append(path_cat(os.sep.join(path_lst), fname))
 
     elif 'c' not in local.keys() and 'c' in upstream.keys():
         for fname in upstream['c'].keys():
-            print (f'Missing locally: {path_cat(os.sep.join(path_lst), fname)}')
+            missing_locally.append(path_cat(os.sep.join(path_lst), fname))
 
     elif 'c' in local.keys() and 'c' not in upstream.keys():
         for fname in local['c'].keys():
-            print (f'Missing upstream: {path_cat(os.sep.join(path_lst), fname)}')
+            missing_upstream.append(path_cat(os.sep.join(path_lst), fname))
 
-    return checksum_count, children_count
+    return missing_upstream, missing_locally, different, checksum_count, children_count
 
-def recursive_name_tree_print(indent, node):
-    print (indent + node['name'])
-    if 'c' in node.keys():
-        for name, child in node['c'].items():
-            recursive_name_tree_print(indent + ' ', child)
+def canonical_path(path):
+    return os.sep + path.strip(os.sep)
 
-def recursive_tree_print(path, node):
-    print (path_cat(path, node['name']))
-    if 'c' in node.keys():
-        for name, child in node['c'].items():
-            recursive_tree_print(path_cat(path, node['name']), child)
-
-def recursive_tree_size(path, node):
+def recursive_tree_size(node, path='', skip=set()):
     count = 0
     file_count = 0
     file_list = []
     if 'c' in node.keys():
-        count += len(node['c'])
         for name, child in node['c'].items():
-            l_count, l_file_count, l_file_list = recursive_tree_size(path_cat(path, node['name']), child)
-            count += l_count
-            file_count += l_file_count
-            file_list += l_file_list
+            c_path = canonical_path(path_cat(path, node['name'], name))
+            if c_path not in skip:
+                count += 1
+                l_count, l_file_count, l_file_list = recursive_tree_size(child, path=path_cat(path, node['name']), skip=skip)
+                count += l_count
+                file_count += l_file_count
+                file_list += l_file_list
     else:
-        file_list.append(path_cat(path, node['name']))
-        file_count += 1
+        c_path = canonical_path(path_cat(path, node['name']))
+        if c_path not in skip:
+            file_list.append(path_cat(path, node['name']))
+            file_count += 1
     return count, file_count, file_list
 
-def diff():
+def binding_add():
     if len(sys.argv) > 2:
-        local_path = os.path.abspath(path_resolve(sys.argv[2]))
-        upstream_path = sys.argv[3]
+        # For now bindings can only happen between two directories, there's no
+        # way to bind an upstream file into a local directory, this allows
+        # having different directory names upstream and locally. Here we make
+        # sure stored paths always have a trailing '/'.
+        #
+        # Another approach would be to always bind an upstream file or
+        # directory into a local directory and always take the local directory
+        # in the binding as the parent of whatever was selected upstream. This
+        # enforces having the same name upstream and locally and allows binding
+        # of single files, but the asymetry of the relationship is probably not
+        # as intuitive?... not sure.
+        #
+        # We could also support both, by adding some semantics to the trailing
+        # '/', like rsync does. The problem is I never remember rsync's
+        # semantics, I don't want that to happen here.
+        local_path = path_cat(os.path.abspath(path_resolve(sys.argv[2])), '')
+        upstream_path = path_cat(sys.argv[3], '')
     else:
         print ('Missing arguments.')
         return
 
-    if get_cli_bool_opt('--build-local'):
-        local_tree = get_local_file_tree(local_path)
-        print()
+    bindings = store_get(bindings_prop, default={})
+    bindings[upstream_path] = local_path
+    store(bindings_prop, bindings)
+
+def binding_show():
+    bindings = store_get(bindings_prop)
+    if bindings != None:
+        for key, value in bindings.items():
+            print (f"'{value}' - '{key}'")
+
+def diff():
+    if len(sys.argv) == 4:
+        local_path = os.path.abspath(path_resolve(sys.argv[2]))
+        upstream_path = sys.argv[3]
+
+        if get_cli_bool_opt('--build-local'):
+            local_tree = get_local_file_tree(local_path)
+            print()
+        else:
+            local_tree = pickle_load(local_file_tree_fname)
+        local_path_lst = path_as_list(local_path)
+        local_subtree = lookup_path (local_tree, local_path_lst)
+
+        upstream_tree = pickle_load(file_tree_fname)
+        upstream_path_lst = path_as_list(upstream_path)
+        upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
+
+        missing_upstream, missing_locally, different, checksum_count, children_count = \
+            recursive_tree_compare(local_subtree, upstream_subtree)
+
+        for fpath in different:
+            print (f'Different: {fpath}')
+
+        for fpath in missing_upstream:
+            print (f'Missing upstream: {fpath}')
+
+        for fpath in missing_locally:
+            print (f'Missing locally: {fpath}')
+
+        if len(missing_locally) + len(missing_upstream) + len(different) > 0:
+            print ()
+
+        print (f'Successful checksum comparisons: {checksum_count}')
+        print (f'Children name comparisons: {children_count}')
+        children_count, file_count, *_ = recursive_tree_size(upstream_subtree)
+        print (f'Upstream subtree size: {file_count}/{children_count}')
+        children_count, file_count, *_ = recursive_tree_size(local_subtree)
+        print (f'Local subtree size: {file_count}/{children_count}')
+
+    elif len(sys.argv) == 2:
+        local_tree = pickle_load(local_file_tree_fname)
+        upstream_tree = pickle_load(file_tree_fname)
+
+        is_first = True
+        bindings = store_get(bindings_prop)
+        for upstream_path, local_path in bindings.items():
+            local_path_lst = path_as_list(local_path)
+            local_subtree = lookup_path (local_tree, local_path_lst)
+
+            upstream_path_lst = path_as_list(upstream_path)
+            upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
+
+            missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
+                recursive_tree_compare(local_subtree, upstream_subtree)
+
+            if not is_first:
+                print()
+            is_first = False
+
+            info (f"U '{upstream_path}'")
+            info (f"L '{local_path}'")
+
+            for fpath in different:
+                print (f'Different: {fpath}')
+
+            for fpath in missing_upstream:
+                print (f'Missing upstream: {fpath}')
+
+            # Bound directories will be counted as missing locally on the root
+            # comparison, here we remove those from the actual list of files missing
+            # upstream.
+            missing_locally = []
+            contained_bound = set()
+            for fpath in tmp_missing_locally:
+                # TODO: When we support binding files upstream, we shouldn't force
+                # the upstream path to be terminated by '/'.
+                upstream_fpath = path_cat(upstream_path, fpath, '')
+                if upstream_fpath not in bindings.keys():
+                    print (f'Missing locally: {fpath}')
+                    missing_locally.append (fpath)
+                else:
+                    print (f'Bound Subtree: {fpath}')
+                    contained_bound.add (canonical_path(path_cat(upstream_path,fpath)))
+
+            if len(tmp_missing_locally) + len(missing_upstream) + len(different) > 0:
+                print ()
+
+            # TODO: Collapse output of equal subtrees but print full output for
+            # those different. Use a --verbose flag to force full output even
+            # if subtrees are equal.
+            print (f'{checksum_count}/{children_count} - successful comparisons (checksums/names)')
+            children_count, file_count, *_ = recursive_tree_size(upstream_subtree, skip=contained_bound)
+            print (f'{file_count}/{children_count} - upstream (files/nodes)')
+            children_count, file_count, *_ = recursive_tree_size(local_subtree, skip=contained_bound)
+            print (f'{file_count}/{children_count} - local (files/nodes)')
+
     else:
-        local_tree = pickle_load(local_file_name_tree_fname)
-    local_path_lst = path_as_list(local_path)
-    local_subtree = lookup_path (local_tree, local_path_lst)
-
-    upstream_tree = pickle_load(file_name_tree_fname)
-    upstream_path_lst = path_as_list(upstream_path)
-    upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
-
-    #recursive_tree_print ('', local_subtree)
-    #print()
-    #recursive_tree_print ('', upstream_subtree)
-    #print()
-
-    checksum_count, children_count = recursive_tree_compare([], local_subtree, upstream_subtree)
-    print ()
-
-    print (f'Successful checksum comparisons: {checksum_count}')
-    print (f'Children name comparisons: {children_count}')
-
-    children_count, file_count, file_list = recursive_tree_size('', upstream_subtree)
-    print (f'Upstream subtree size: {file_count}/{children_count}')
-    #file_list.sort()
-    #print ('\n'.join(file_list))
-
-    children_count, file_count, file_list = recursive_tree_size('', local_subtree)
-    print (f'Local subtree size: {file_count}/{children_count}')
-    #file_list.sort()
-    #print ('\n'.join(file_list))
+        print ('Invalid arguments.')
 
 def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
     if not os.path.isfile(local_abs_path):
@@ -469,7 +563,7 @@ def upload():
         print ('Missing arguments.')
         return
 
-    upstream_tree = pickle_load(file_name_tree_fname)
+    upstream_tree = pickle_load(file_tree_fname)
     upstream_path_lst = path_as_list(upstream_path)
     upstream_root = upstream_tree['My Drive']
 
