@@ -112,6 +112,32 @@ def sequential_file_dump ():
     pickle_dump (files, file_dict_fname)
     print (f'Total: {len(files)}')
 
+def sequential_file_dump_update():
+    # TODO: Implement an update request to the file dump. Use the Changes API
+    # from google drive [1]. Save the next page token in the persistent store,
+    # then after each update get all changed files and update them in the file
+    # dictionary. Careful about this:
+    #
+    #  - Thrashed files are not really removed, they only get their 'thrashed'
+    #    attribute set to true.
+    #
+    #  - Information of permanently removed files can't be accessed anymore, so
+    #    the 'file' attrigute of the change object won't be present. The id of
+    #    the removed file will come in the 'fileId' attribute of the change
+    #    object. This will happen for example when the thrash bin is emptied.
+    #
+    #  - The ids parameter in the request should look similar to this
+    #       newStartPageToken,changes(fileId,changeType,removed,file(id,trashed,name,md5Checksum,parents))
+    # 
+    # Some things I haven't tried yet:
+    #
+    #  - What happens when thrashing/removing a subtree?, I would guess we get
+    #    a change object for each folder/file in it.
+    #  - What happens when files/subtrees are moved?.
+    #
+    # [1]: https://developers.google.com/drive/api/v3/reference/changes
+    pass
+
 def tree_file_dump ():
     parameters = {'fields':'nextPageToken,files(id,mimeType,name,md5Checksum,parents)', 'pageSize':1000, 'q':"'root' in parents"}
 
