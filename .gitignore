@@ -2,6 +2,11 @@
 token.pickle
 client_secret.json
 
+file_dict*
+file_tree*
+local_file_tree*
+to_upload
+
 *.swp
 *.log
 perf.data*
