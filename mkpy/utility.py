@@ -1019,3 +1019,65 @@ def pymk_default (skip_snip_cache=[]):
         if t != 'default' and t != 'install' and t not in skip_snip_cache:
             store ('last_snip', value=t)
 
+###################
+# Custom status logger API
+#
+# This is a simpler logging API than the default logger that allows to easily
+# get the result of a single call.
+_level_enum = {
+    'OUT': 0,
+    'ERROR': 1,
+    'WARNING': 2,
+    'INFO': 3,
+    'DEBUG': 4
+}
+_level_to_name = {}
+
+# Create variables for the level enum above and a dictionary to get the names
+_g = globals()
+for varname, value in _level_enum.items():
+    _g[varname] = value
+    _g['_level_to_name'][value] = varname
+
+class StatusEvent():
+    def __init__(self, message, level=INFO):
+        self.message = message
+        self.level = level
+
+class Status():
+    def __init__(self, level=WARNING):
+        self.events = []
+        self.level = level
+
+    def __str__(self):
+        events_str_arr = [f'{_level_to_name[e.level]}: {e.message}' for e in self.events if e.level <= self.level]
+        return '\n'.join(events_str_arr)
+
+def error(status, message, echo=False):
+    if echo:
+        print (message)
+
+    if status != None and status.level >= ERROR:
+        status.events.append (StatusEvent(message, level=ERROR))
+
+def warning(status, message, echo=False):
+    if echo:
+        print (message)
+
+    if status != None and status.level >= WARNING:
+        status.events.append (StatusEvent(message, level=WARNING))
+
+def info(status, message, echo=False):
+    if echo:
+        print (message)
+
+    if status != None and status.level >= INFO:
+        status.events.append (StatusEvent(message, level=INFO))
+
+def debug(status, message, echo=False):
+    if echo:
+        print (message)
+
+    if status != None and status.level >= DEBUG:
+        status.events.append (StatusEvent(message, level=DEBUG))
+
