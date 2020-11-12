@@ -366,6 +366,8 @@ def ex (cmd, no_stdout=False, ret_stdout=False, echo=True):
             pass
         return result
 
+# TODO: Rename this because it has the same name as one of the defaúlt logging
+# functions in python.
 def info (s):
     # The following code can be used to se available colors
     #for i in range (8):
@@ -1019,7 +1021,7 @@ def pymk_default (skip_snip_cache=[]):
         if t != 'default' and t != 'install' and t not in skip_snip_cache:
             store ('last_snip', value=t)
 
-###################
+##########################
 # Custom status logger API
 #
 # This is a simpler logging API than the default logger that allows to easily
@@ -1053,28 +1055,28 @@ class Status():
         events_str_arr = [f'{_level_to_name[e.level]}: {e.message}' for e in self.events if e.level <= self.level]
         return '\n'.join(events_str_arr)
 
-def error(status, message, echo=False):
+def log_error(status, message, echo=False):
     if echo:
         print (message)
 
     if status != None and status.level >= ERROR:
         status.events.append (StatusEvent(message, level=ERROR))
 
-def warning(status, message, echo=False):
+def log_warning(status, message, echo=False):
     if echo:
         print (message)
 
     if status != None and status.level >= WARNING:
         status.events.append (StatusEvent(message, level=WARNING))
 
-def info(status, message, echo=False):
+def log_info(status, message, echo=False):
     if echo:
         print (message)
 
     if status != None and status.level >= INFO:
         status.events.append (StatusEvent(message, level=INFO))
 
-def debug(status, message, echo=False):
+def log_debug(status, message, echo=False):
     if echo:
         print (message)
 
