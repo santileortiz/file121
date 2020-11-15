@@ -463,6 +463,7 @@ def diff():
         local_tree = pickle_load(local_file_tree_fname)
         upstream_tree = pickle_load(file_tree_fname)
 
+        to_upload = {}
         is_first = True
         bindings = store_get(bindings_prop)
         for upstream_path, local_path in bindings.items():
@@ -486,6 +487,7 @@ def diff():
                 print (f'Different: {fpath}')
 
             for fpath in missing_upstream:
+                to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
                 print (f'Missing upstream: {fpath}')
 
             # Bound directories will be counted as missing locally on the root
@@ -516,16 +518,20 @@ def diff():
             children_count, file_count, *_ = recursive_tree_size(local_subtree, skip=contained_bound)
             print (f'{file_count}/{children_count} - local (files/nodes)')
 
+        if len(to_upload) > 0:
+            py_literal_dump (to_upload, to_upload_fname)
+            print (f'\nAdded files to be uploaded to: {to_upload_fname}')
+
     else:
         print ('Invalid arguments.')
 
-def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
+def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, status=None):
     if not os.path.isfile(local_abs_path):
-        print (f"Upload failed because it's not a file: {local_abs_path}")
+        log_error (status, f"Can't upload because it's not a file: {local_abs_path}")
         return
 
     # Find parent in upstream tree
-    error = None
+    has_error = False
     path_lst = path_as_list(upstream_abs_path)
     directory_path = path_lst[:-1]
     node = upstream_root
@@ -534,18 +540,27 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path):
         if 'c' in node.keys() and dirname in node['c'].keys():
             node = node['c'][dirname]
         else:
-            error = f"Can't upload file because directory '{dirname}' doesn't exist: {upstream_abs_path}\n"
+            log_error (status, f"Can't upload file because directory '{dirname}' doesn't exist upstream: {upstream_abs_path}\n")
+            has_error = True
             break
 
-    if error == None:
+    if not has_error:
         file_metadata = {'name': path_lst[-1], 'parents': [node['id']]}
         data = MediaFileUpload(local_abs_path,
-                mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0])
-        service.files().create(body=file_metadata,
-                media_body=data).execute()
+                mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0],
+                resumable=True,
+                chunksize=1048576)
+
         print (f"{local_abs_path} -> {upstream_abs_path}")
 
-    return error
+        print (f'[0%]', file=sys.stderr, end='')
+        request = service.files().create(body=file_metadata, media_body=data)
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print (f'\r[{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
+        print (f'\r', file=sys.stderr, end='')
 
 def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_abs_path):
     if not os.path.isdir(local_abs_path):
@@ -581,61 +596,63 @@ def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_ab
             parent_lst[0] = node['id']
         print (f"In '{os.sep.join(path_lst[:missing_idx])}' created folder(s): {os.sep.join(path_lst[missing_idx:])}")
 
-def upload():
-    if len(sys.argv) > 2:
-        local_path = os.path.abspath(path_resolve(sys.argv[2]))
-        upstream_path = sys.argv[3]
+def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=None, status=None):
+    """
+    Uploads ether a file or a directory recursively
+    """
+
+    if service == None:
+        service = google.get_service()
+
+    if upstream_root == None:
+        upstream_tree = pickle_load(file_tree_fname)
+        upstream_root = upstream_tree['My Drive']
+
+
+    if os.path.isfile(local_abs_path):
+        upload_file (service, local_abs_path, upstream_root, upstream_abs_path)
+
+    elif os.path.isdir(local_abs_path):
+        for dirpath, dirnames, filenames in os.walk(local_abs_path):
+            for dname in dirnames:
+                fpath = path_cat (dirpath, dname)
+                if os.path.islink(fpath):
+                    log_warning (status, f'Ignoring link to directory {path_cat(fpath)}\n', echo=True)
+
+            if dirpath.find(local_abs_path) == 0:
+                upstream_base = dirpath[len(local_abs_path):]
+
+                upstream_dirpath = path_cat (upstream_abs_path, upstream_base)
+                ensure_upstream_dir_path (service, dirpath, upstream_root, upstream_dirpath)
+
+                for fname in filenames:
+                    upstream_file_path = path_cat (upstream_dirpath, fname)
+                    upload_file (service, path_cat(dirpath, fname), upstream_root, upstream_file_path, status=status)
+
+            else:
+                log_error (status, f"Can't create upstream path for: {dirpath} (local: {local_abs_path})\n", echo=True)
+
     else:
-        print ('Missing arguments.')
-        return
+        log_warning (status, f'Skipping unknown file type (link?): {local_abs_path}\n', echo=True)
 
-    upstream_tree = pickle_load(file_tree_fname)
-    upstream_path_lst = path_as_list(upstream_path)
-    upstream_root = upstream_tree['My Drive']
+def upload():
+    to_upload = py_literal_load (to_upload_fname)
 
-    with open(to_upload_fname, "r") as f:
-        file_lst = f.read().strip('\n').split('\n')
+    if len(to_upload) > 0:
+        upstream_tree = pickle_load(file_tree_fname)
+        upstream_root = upstream_tree['My Drive']
 
-    msg = ''
-    service = google.get_service()
-    for f_path in file_lst:
-        upstream_abs_path = path_cat(upstream_path, f_path)
-        local_abs_path = path_cat(local_path, f_path)
+        stat = Status()
+        service = google.get_service()
+        for local_abs_path, upstream_abs_path in to_upload.items():
+            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=stat)
 
-        if os.path.isfile(local_abs_path):
-            upload_file (service, local_abs_path, upstream_root, upstream_abs_path)
+        # Because the output can be very long, summarize all messages at
+        # the end
+        print (stat)
 
-        elif os.path.isdir(local_abs_path):
-            for dirpath, dirnames, filenames in os.walk(local_abs_path):
-                for dname in dirnames:
-                    fpath = path_cat (dirpath, dname)
-                    if os.path.islink(fpath):
-                        msg += f'Ignoring link to directory {path_cat(fpath)}\n'
-                        print(f'Ignoring link to directory {path_cat(fpath)}\n')
-
-                if dirpath.find(local_abs_path) == 0:
-                    upstream_base = dirpath[len(local_abs_path):]
-
-                    upstream_dirpath = path_cat (upstream_abs_path, upstream_base)
-                    ensure_upstream_dir_path (service, dirpath, upstream_root, upstream_dirpath)
-
-                    for fname in filenames:
-                        upstream_file_path = path_cat (upstream_dirpath, fname)
-                        error = upload_file (service, path_cat(dirpath, fname), upstream_root, upstream_file_path)
-                        if error != None:
-                            msg += error
-
-                else:
-                    msg += f"Error creating upstream path for: {dirpath} (local: {local_abs_path})\n"
-                    print (f"Error creating upstream path for: {dirpath} (local: {local_abs_path})")
-
-        else:
-            msg += f'Skipping unknown file type (link?): {local_abs_path}\n'
-            print (f'Skipping unknown file type (link?): {local_abs_path}')
-
-    # Because the output can be very long, summarize all messages at
-    # the end
-    print (msg)
+    else:
+        print ('List of files to upload is empty.')
 
 if __name__ == "__main__":
     # Everything above this line will be executed for each TAB press.
