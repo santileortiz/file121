@@ -1027,7 +1027,6 @@ def pymk_default (skip_snip_cache=[]):
 # This is a simpler logging API than the default logger that allows to easily
 # get the result of a single call.
 _level_enum = {
-    'OUT': 0,
     'ERROR': 1,
     'WARNING': 2,
     'INFO': 3,
@@ -1055,31 +1054,15 @@ class Status():
         events_str_arr = [f'{_level_to_name[e.level]}: {e.message}' for e in self.events if e.level <= self.level]
         return '\n'.join(events_str_arr)
 
-def log_error(status, message, echo=False):
-    if echo:
-        print (message)
+def log_clsr(level_value):
+    def log_generic(status, message, echo=False):
+        if echo:
+            print (message)
 
-    if status != None and status.level >= ERROR:
-        status.events.append (StatusEvent(message, level=ERROR))
+        if status != None and status.level >= level_value:
+            status.events.append (StatusEvent(message, level=level_value))
+    return log_generic
 
-def log_warning(status, message, echo=False):
-    if echo:
-        print (message)
-
-    if status != None and status.level >= WARNING:
-        status.events.append (StatusEvent(message, level=WARNING))
-
-def log_info(status, message, echo=False):
-    if echo:
-        print (message)
-
-    if status != None and status.level >= INFO:
-        status.events.append (StatusEvent(message, level=INFO))
-
-def log_debug(status, message, echo=False):
-    if echo:
-        print (message)
-
-    if status != None and status.level >= DEBUG:
-        status.events.append (StatusEvent(message, level=DEBUG))
+for level_name, level_value in _level_enum.items():
+    _g[f'log_{level_name.lower()}'] = log_clsr(level_value)
 
