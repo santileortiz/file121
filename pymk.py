@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 from mkpy.utility import *
 import google_utility as google
+from datetime import datetime, timezone
 import hashlib
 import traceback
 
@@ -266,7 +267,7 @@ def find_name_duplicates():
     node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
-def get_local_file_tree(path, local_file_name_tree = {}):
+def get_local_file_tree(path, local_file_name_tree = {}, status=None):
     path_lst = []
     for dirpath, dirnames, filenames in os.walk(path):
         for dname in dirnames:
@@ -288,32 +289,54 @@ def get_local_file_tree(path, local_file_name_tree = {}):
             node['c'] = {}
 
         for fname in filenames:
-            hash_md5 = hashlib.md5()
-            with open(path_cat(dirpath, fname), "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    hash_md5.update(chunk)
+            abs_path = path_cat(dirpath, fname)
 
-            checksum = hash_md5.hexdigest()
-            node['c'][fname] = {'name':fname, 'md5Checksum':checksum}
-            print (f'{checksum} - {path_cat(dirpath, fname)}')
+            if os.path.isfile(abs_path):
+                modified_timestamp = datetime.fromtimestamp(os.path.getmtime(abs_path), timezone.utc)
+
+                hash_md5 = hashlib.md5()
+                with open(abs_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(4096), b""):
+                        hash_md5.update(chunk)
+
+                checksum = hash_md5.hexdigest()
+                node['c'][fname] = {'name':fname, 'md5Checksum':checksum, '_internal_modifiedTime':modified_timestamp}
+                print (f'{checksum} - {path_cat(dirpath, fname)}')
+
+            else:
+                log_warning (status, f'Skipping unknown file type (link?): {abs_path}', echo=True)
 
     return local_file_name_tree
 
 def build_local_file_name_tree():
+    stat = Status()
+
     if len(sys.argv) > 2:
         path = sys.argv[2]
         path = os.path.abspath(path_resolve(path))
 
-        local_file_name_tree = get_local_file_tree(path)
+        local_file_name_tree = get_local_file_tree(path, status=stat)
         pickle_dump (local_file_name_tree, local_file_tree_fname)
 
     else:
         local_file_name_tree = {}
         for upstream_path, local_path in store_get(bindings_prop).items():
             info (f'L {local_path}')
-            get_local_file_tree (local_path, local_file_name_tree=local_file_name_tree)
+            get_local_file_tree (local_path, local_file_name_tree=local_file_name_tree, status=stat)
 
         pickle_dump (local_file_name_tree, local_file_tree_fname)
+
+    print()
+    print (stat)
+
+def update_local_file_name_tree():
+    local_file_name_tree = pickle_load (file_tree_fname)
+    for upstream_path, local_path in store_get(bindings_prop).items():
+        info (f'L {local_path}')
+        # TODO: Implement this...
+        #update_local_file_tree (local_path, local_file_name_tree)
+
+    pickle_dump (local_file_name_tree, local_file_tree_fname)
 
 def recursive_tree_compare(local, upstream, path_lst=[]):
     missing_upstream = []
@@ -557,9 +580,17 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, statu
         request = service.files().create(body=file_metadata, media_body=data)
         response = None
         while response is None:
-            status, response = request.next_chunk()
-            if status:
-                print (f'\r[{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
+            try:
+                status, response = request.next_chunk()
+                if status:
+                    print (f'\r[{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
+
+            except OSError:
+                response = None
+                print (f'\r', file=sys.stderr, end='')
+                print (f'Error uploading chunk. Retrying...')
+                print (f'[0%]', file=sys.stderr, end='')
+
         print (f'\r', file=sys.stderr, end='')
 
 def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_abs_path):
@@ -617,7 +648,7 @@ def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=
             for dname in dirnames:
                 fpath = path_cat (dirpath, dname)
                 if os.path.islink(fpath):
-                    log_warning (status, f'Ignoring link to directory {path_cat(fpath)}\n', echo=True)
+                    log_warning (status, f'Ignoring link to directory {path_cat(fpath)}', echo=True)
 
             if dirpath.find(local_abs_path) == 0:
                 upstream_base = dirpath[len(local_abs_path):]
@@ -630,10 +661,10 @@ def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=
                     upload_file (service, path_cat(dirpath, fname), upstream_root, upstream_file_path, status=status)
 
             else:
-                log_error (status, f"Can't create upstream path for: {dirpath} (local: {local_abs_path})\n", echo=True)
+                log_error (status, f"Can't create upstream path for: {dirpath} (local: {local_abs_path})", echo=True)
 
     else:
-        log_warning (status, f'Skipping unknown file type (link?): {local_abs_path}\n', echo=True)
+        log_warning (status, f'Skipping unknown file type (link?): {local_abs_path}', echo=True)
 
 def upload():
     to_upload = py_literal_load (to_upload_fname)
