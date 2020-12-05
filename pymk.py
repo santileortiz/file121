@@ -4,6 +4,7 @@ import google_utility as google
 from datetime import datetime, timezone
 import hashlib
 import traceback
+import stat
 
 import mimetypes
 from googleapiclient.http import MediaFileUpload
@@ -39,7 +40,7 @@ def sequential_file_dump ():
     success = False
     files = {}
     if is_in_progress:
-        print ('Detected partially complete dump, starting with from stored page token.')
+        print ('Detected partially complete dump, restarting using stored page token.')
         parameters['pageToken'] = store_get('nextPageToken')
         files = pickle_load (file_dict_fname)
 
@@ -267,7 +268,34 @@ def find_name_duplicates():
     node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
+def set_file_entry(node_children, abs_path, fname=None, f_stat=None):
+    if f_stat == None:
+        f_stat = os.stat(abs_path)
+
+    if fname == None:
+        fname = path_basename(abs_path)
+
+    if stat.S_ISREG(f_stat.st_mode):
+        hash_md5 = hashlib.md5()
+        with open(abs_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+
+        checksum = hash_md5.hexdigest()
+        node_children[fname] = {'name':fname, 'md5Checksum':checksum, '_internal_modifiedTime':f_stat.st_mtime}
+
+        print (f'A {checksum} - {abs_path}')
+
+    else:
+        log_warning (status, f'Skipping unknown file type (link?): {abs_path}', echo=True)
+
 def get_local_file_tree(path, local_file_name_tree = {}, status=None):
+    # TODO: Simplify this. Change local_file_name_tree for a node which we
+    # assume is the one pointed to by path. It also should make things faster
+    # because we won't be ensuring the whole path exists in each recursive
+    # call. It shouldn't be necessary to receive the local_file_name_tree
+    # parameter.
+
     path_lst = []
     for dirpath, dirnames, filenames in os.walk(path):
         for dname in dirnames:
@@ -301,12 +329,18 @@ def get_local_file_tree(path, local_file_name_tree = {}, status=None):
 
                 checksum = hash_md5.hexdigest()
                 node['c'][fname] = {'name':fname, 'md5Checksum':checksum, '_internal_modifiedTime':modified_timestamp}
-                print (f'{checksum} - {path_cat(dirpath, fname)}')
+                print (f'A {checksum} - {path_cat(dirpath, fname)}')
 
             else:
                 log_warning (status, f'Skipping unknown file type (link?): {abs_path}', echo=True)
 
     return local_file_name_tree
+
+def set_3_way_operate(set1, set2):
+    # TODO: This feels slow, is it?, or does Python keep some cache that makes
+    # these operations fast?.
+    return set1-set2, set1&set2, set2-set1;
+
 
 def build_local_file_name_tree():
     stat = Status()
@@ -329,12 +363,66 @@ def build_local_file_name_tree():
     print()
     print (stat)
 
+def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, status=None):
+    abs_path = os.sep + os.sep.join(path_lst)
+
+    if 'c' in node.keys():
+        new_dirs = set()
+        new_files = set()
+        new_entries = {}
+        for dir_entry in os.scandir(abs_path):
+            new_entries[dir_entry.name] = dir_entry
+            if dir_entry.is_dir(follow_symlinks=False):
+                new_dirs.add(dir_entry.name)
+            elif dir_entry.is_file():
+                new_files.add(dir_entry.name)
+
+        old_dirs = set()
+        old_files = set()
+        old_nodes = node['c']
+        for name, child in node['c'].items():
+            if 'c' in child.keys():
+                old_dirs.add(name)
+            else:
+                old_files.add(name)
+
+        removed_dirs, equal_dirs, added_dirs = set_3_way_operate(old_dirs, new_dirs)
+        removed_files, equal_files, added_files = set_3_way_operate(old_files, new_files)
+
+        for removed in removed_dirs:
+            del old_nodes[removed]
+            print (f'R {path_cat(abs_path, removed)}')
+
+        for removed in removed_files:
+            del old_nodes[removed]
+            print (f'R {path_cat(abs_path, removed)}')
+
+        for dirname in equal_dirs:
+            recursive_update_local_file_tree(path_lst + [dirname], old_nodes[dirname], local_file_name_tree)
+
+        for fname in equal_files:
+            f_stat = new_entries[fname].stat()
+            modified_timestamp = datetime.fromtimestamp(f_stat.st_mtime, timezone.utc)
+            if modified_timestamp > old_nodes[fname]['_internal_modifiedTime']:
+                fpath = path_cat(abs_path, fname)
+                old_md5 = old_nodes[fname]['md5Checksum']
+                set_file_entry(old_nodes, fpath, fname=fname, f_stat=f_stat)
+                print (f'U {old_md5} -> {old_nodes[fname]["md5Checksum"]} - {fpath}')
+
+        for fname in added_dirs:
+            get_local_file_tree (path_cat(abs_path, fname), local_file_name_tree, status=status)
+
+        for fname in added_files:
+            fpath = path_cat(abs_path, fname)
+            set_file_entry(old_nodes, fpath, f_stat=f_stat)
+            print (f'A {old_nodes[fname]["md5Checksum"]} - {fpath}')
+
 def update_local_file_name_tree():
-    local_file_name_tree = pickle_load (file_tree_fname)
+    local_file_name_tree = pickle_load (local_file_tree_fname)
     for upstream_path, local_path in store_get(bindings_prop).items():
         info (f'L {local_path}')
-        # TODO: Implement this...
-        #update_local_file_tree (local_path, local_file_name_tree)
+        local_path_lst = path_as_list (local_path)
+        recursive_update_local_file_tree (local_path_lst, lookup_path(local_file_name_tree, local_path_lst), local_file_name_tree)
 
     pickle_dump (local_file_name_tree, local_file_tree_fname)
 
@@ -442,6 +530,33 @@ def binding_show():
     if bindings != None:
         for key, value in bindings.items():
             print (f"'{value}' - '{key}'")
+
+def compare_local_dumps():
+    if len(sys.argv) == 4:
+        tree1 = pickle_load(sys.argv[2])
+        tree2 = pickle_load(sys.argv[3])
+
+        missing_2, missing_1, different, checksum_count, children_count = \
+            recursive_tree_compare(tree1, tree2)
+
+        for fpath in different:
+            print (f'Different: {fpath}')
+
+        for fpath in missing_1:
+            print (f'< {fpath}')
+
+        for fpath in missing_2:
+            print (f'> {fpath}')
+
+        if len(missing_1) + len(missing_2) + len(different) > 0:
+            print ()
+
+        print (f'Successful checksum comparisons: {checksum_count}')
+        print (f'Children name comparisons: {children_count}')
+        children_count, file_count, *_ = recursive_tree_size(tree1['c']['home'])
+        print (f'Tree 1 size: {file_count}/{children_count}')
+        children_count, file_count, *_ = recursive_tree_size(tree2['c']['home'])
+        print (f'Tree 2 size: {file_count}/{children_count}')
 
 def diff():
     if len(sys.argv) == 4:
