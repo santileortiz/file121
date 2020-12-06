@@ -412,7 +412,7 @@ def ex (cmd, no_stdout=False, ret_stdout=False, echo=True):
 # TODO: Rename this because it has the same name as one of the default logging
 # functions in python.
 def info (s):
-    # The following code can be used to se available colors
+    # The following code can be used to see available colors
     #for i in range (8):
     #    print ("\033[0;3" + str(i) + "m\033[K" + "HELLO" + "\033[m\033[K", end=' ')
     #    print ("\033[0;9" + str(i) + "m\033[K" + "HELLO" + "\033[m\033[K", end=' ')
@@ -430,6 +430,31 @@ def warn (s):
     color = '\033[1;33m\033[K'
     default_color = '\033[m\033[K'
     print (color+s+default_color)
+
+def ecma_red(s):
+ return f"\033[1;31m\033[K{s}\033[m\033[K"
+
+def ecma_green(s):
+ return f"\033[1;32m\033[K{s}\033[m\033[K"
+
+def ecma_yellow(s):
+ return f"\033[1;33m\033[K{s}\033[m\033[K"
+
+def ecma_blue(s):
+ return f"\033[1;34m\033[K{s}\033[m\033[K"
+
+def ecma_magenta(s):
+ return f"\033[1;35m\033[K{s}\033[m\033[K"
+
+def ecma_cyan(s):
+ return f"\033[1;36m\033[K{s}\033[m\033[K"
+
+def ecma_white(s):
+ return f"\033[1;37m\033[K{s}\033[m\033[K"
+
+def ecma_bold(s):
+ return f"\033[1m\033[K{s}\033[m\033[K"
+
 
 def pickle_load(fname):
     with open (fname, 'rb') as f:

@@ -102,7 +102,15 @@ def __google_get(*args, **kwargs):
 
     client_id, client_secret = client_credentials()
     oauth = OAuth2Session(client_id, token=token)
-    return oauth.get(*args, **kwargs).json()
+
+    response = oauth.get(*args, **kwargs)
+    if response.status_code != 200:
+        print (f'Got unexpected response code: {response.json()}')
+        data = None
+    else:
+        data = response.json()
+
+    return data
 
 def get(*args, **kwargs):
     r = None
@@ -113,7 +121,8 @@ def get(*args, **kwargs):
     #
     # [1]: https://stackoverflow.com/questions/54227770/request-get-is-getting-stuck/54257352
     # [2]: https://requests.readthedocs.io/en/master/user/advanced/#timeouts
-    kwargs['timeout'] = 150
+    if 'timeout' not in kwargs.keys():
+        kwargs['timeout'] = 150
 
     try:
         r = __google_get(*args, **kwargs)
@@ -151,3 +160,20 @@ def get_service():
             pickle.dump(creds, token)
 
     return build('drive', 'v3', credentials=creds)
+
+def request_execute_cli(request):
+    print (f'[0%]', file=sys.stderr, end='')
+    response = None
+    while response is None:
+        try:
+            status, response = request.next_chunk()
+            if status:
+                print (f'\r[{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
+
+        except OSError:
+            response = None
+            print (f'\r', file=sys.stderr, end='')
+            print (f'Error uploading chunk. Retrying...')
+            print (f'[0%]', file=sys.stderr, end='')
+
+        print (f'\r', file=sys.stderr, end='')

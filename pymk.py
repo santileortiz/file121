@@ -16,7 +16,11 @@ import pdb
 file_dict_fname = 'file_dict'
 file_tree_fname = 'file_tree'
 local_file_tree_fname = 'local_file_tree'
+abs_local_file_tree_fname = os.path.abspath(path_resolve(local_file_tree_fname))
+
 to_upload_fname = 'to_upload'
+to_remove_fname = 'to_remove'
+to_update_fname = 'to_update'
 
 bindings_prop = 'bindings'
 
@@ -46,54 +50,57 @@ def sequential_file_dump ():
 
     while True:
         try:
-            r = google.get('https://www.googleapis.com/drive/v3/files', params=parameters)
+            json_data = google.get('https://www.googleapis.com/drive/v3/files', params=parameters)
         except Exception as e:
             print ('Error while performing request to Google, dump can be restarted by re running the command.')
             print (traceback.format_exc())
             store(progress_flag_name, True)
             break
 
-        if 'files' in r.keys():
-            for f in r['files']:
-                f_id = f['id']
-                if f_id in files:
-                    # This should never happen
-                    print (f'Found repeated ID {f_id}')
-                files[f_id] = f
+        if json_data != None:
+            if 'files' in json_data.keys():
+                for f in json_data['files']:
+                    f_id = f['id']
+                    if f_id in files:
+                        # This should never happen
+                        print (f'Found repeated ID {f_id}')
+                    files[f_id] = f
 
-            print (f'Received: {len(r["files"])} ({r["files"][-1]["id"] if len(files) > 0 else ""})')
-        else:
-            print (f'Received response without files.')
-            print (r)
+                print (f'Received: {len(json_data["files"])} ({json_data["files"][-1]["id"] if len(files) > 0 else ""})')
+            else:
+                print (f'Received response without files.')
+                print (json_data)
 
-        if 'nextPageToken' not in r.keys():
-            # Successfully reached the end of the full file list
-            store(progress_flag_name, False)
-            success = True
-            break
-        else:
-            nextPage_token = r['nextPageToken']
-            store('nextPageToken', nextPage_token)
-            parameters['pageToken'] = nextPage_token
-
+            if 'nextPageToken' not in json_data.keys():
+                # Successfully reached the end of the full file list
+                store(progress_flag_name, False)
+                success = True
+                break
+            else:
+                nextPage_token = json_data['nextPageToken']
+                store('nextPageToken', nextPage_token)
+                parameters['pageToken'] = nextPage_token
 
     if success:
         # For some reason, the sequential file dump still misses some parents. Here
-        # we iterate the dump and check that all parent IDs are resolved.  I even
+        # we iterate the dump and check that all parent IDs are resolved. I even
         # tried setting to true 'includeItemsFromAllDrives' and
         # 'supportsAllDrives', it didn't work.
-        ghost_file_ids = set()
+        #
+        # Looks like the problem happens when permanently removig directories.
+        # The subtree for it isn't deleted immediately, so it's possible to get
+        # a full dump and still have elements that shouldn't be there anymore.
+        ghost_files = {}
         for f_id, f in files.items():
             if 'parents' in f.keys():
                 for parent_id in f['parents']:
-                    if parent_id not in files.keys():
-                        ghost_file_ids.add(parent_id)
+                    if parent_id not in files.keys() and parent_id not in files.keys():
+                        ghost_files[parent_id] = f_id
 
         # Get data of all ghost files and their ancestors
         #
         # TODO: Maybe these files should be specially marked, like "ghost" files?.
-        while len(ghost_file_ids) > 0:
-            f_id = ghost_file_ids.pop()
+        for f_id, child in ghost_files.items():
             try:
                 f = google.get(f'https://www.googleapis.com/drive/v3/files/{f_id}')
             except:
@@ -104,12 +111,16 @@ def sequential_file_dump ():
                 # end up adding stuff to the root that's not supposed
                 # to be there...
 
-            files[f_id] = f
-            if 'parents' in f.keys():
-                for parent_id in f['parents']:
-                    if parent_id not in files.keys() and parent_id not in ghost_file_ids:
-                        ghost_file_ids.add(parent_id)
-            print (f'Added ghost file {f_id}')
+            if f != None:
+                files[f_id] = f
+                if 'parents' in f.keys():
+                    for parent_id in f['parents']:
+                        if parent_id not in files.keys() and parent_id not in ghost_files:
+                            ghost_files.add(parent_id)
+                print (f'Added ghost file {f_id}')
+
+            else:
+                print (f'Failed to get parent {f_id} of {ghost_files[f_id]}')
 
     pickle_dump (files, file_dict_fname)
     print (f'Total: {len(files)}')
@@ -210,8 +221,11 @@ def build_file_name_tree():
         # Ensure all directories have a children dictionary, even if it's
         # empty. Currently when computing the diff we distinguish between files
         # and directories by the presence/abscence of this value.
-        if f['mimeType'] == "application/vnd.google-apps.folder" and 'c' not in f.keys():
+        if 'mimeType' in f.keys() and f['mimeType'] == "application/vnd.google-apps.folder" and 'c' not in f.keys():
             f['c'] = {}
+
+        if 'mimeType' not in f.keys():
+            print (f'ERROR!!!!: {f_id}, {f}')
 
         if 'parents' in f.keys():
             for parent_id in f['parents']:
@@ -222,7 +236,7 @@ def build_file_name_tree():
 
     pickle_dump (root, file_tree_fname)
 
-def lookup_path (root, path_lst):
+def lookup_path (root, path_lst, silent=False):
     curr_path = ''
     node = root
     for dirname in path_lst:
@@ -230,8 +244,31 @@ def lookup_path (root, path_lst):
         if 'c' in node.keys() and dirname in node['c'].keys():
             node = node['c'][dirname]
         else:
-            print (f"File doesn't exist: {curr_path}")
+            node = None
+            if not silent:
+                print (f"File doesn't exist: {curr_path}")
     return node
+
+def lookup_path_subtree (node, path_lst):
+    """
+    By definition root node doesn't have a name, when iterating from a root
+    node path_lst[0] is a child of the unamed root. When starting from an
+    arbitrary subtree, path_lst[0] should match the name of the passed node.
+    This function handles both cases.
+    """
+
+    curr_path = ''
+    not_found = False
+    result = None
+
+    if is_root_node(node):
+        result = lookup_path(node, path_lst)
+    elif path_lst[0] == node['name']:
+        result = lookup_path(node, path_lst[1:])
+    else:
+        print (f"File doesn't exist: {path_lst[0]}")
+
+    return result
 
 def path_as_list(path):
     # This is uglier than I wanted because, oddly enough
@@ -268,33 +305,56 @@ def find_name_duplicates():
     node = lookup_path (file_name_tree['My Drive'], path_lst)
     recursive_name_duplicates_print(path, node)
 
-def set_file_entry(node_children, abs_path, fname=None, f_stat=None):
+def set_file_entry(node_children, abs_path, fname=None, f_stat=None, status=None):
     if f_stat == None:
         f_stat = os.stat(abs_path)
 
     if fname == None:
         fname = path_basename(abs_path)
 
+    success = False
     if stat.S_ISREG(f_stat.st_mode):
-        hash_md5 = hashlib.md5()
-        with open(abs_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
+        if abs_path != abs_local_file_tree_fname:
+            hash_md5 = hashlib.md5()
+            with open(abs_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_md5.update(chunk)
 
-        checksum = hash_md5.hexdigest()
-        node_children[fname] = {'name':fname, 'md5Checksum':checksum, '_internal_modifiedTime':f_stat.st_mtime}
+            modified_timestamp = datetime.fromtimestamp(f_stat.st_mtime, timezone.utc)
+            checksum = hash_md5.hexdigest()
+            node_children[fname] = {'name':fname, 'md5Checksum':checksum, '_internal_modifiedTime':modified_timestamp}
+            success = True
 
-        print (f'A {checksum} - {abs_path}')
+
+        else:
+            # It's not possible to synchronize upstream the file that stores
+            # the local file cache. If we did we would enter an infinite loop
+            # where this file is always outdated. Currently with the CLI
+            # interface that only means this file will always show as having
+            # changed, but if we implement a server that triggers updates on
+            # file changes, this would lock it in an infinite cycle.
+            log_warning (status, f'Skipping local file tree cache: {abs_path}')
 
     else:
         log_warning (status, f'Skipping unknown file type (link?): {abs_path}', echo=True)
 
+    return success
+
 def get_local_file_tree(path, local_file_name_tree = {}, status=None):
-    # TODO: Simplify this. Change local_file_name_tree for a node which we
-    # assume is the one pointed to by path. It also should make things faster
-    # because we won't be ensuring the whole path exists in each recursive
-    # call. It shouldn't be necessary to receive the local_file_name_tree
-    # parameter.
+    # TODO: I thought I could change local_file_name_tree for a node which we
+    # assume is the one pointed to by path.It would've made things faster
+    # because we won't be ensuring the whole path exists in each directory
+    # iteration.
+    #
+    # I now think it's not that simple. In some cases, for example if a new
+    # binding was added that points to local path that hasn't been explored, we
+    # need to ensure all ancestors exist before we can get a node from which to
+    # start adding the rest of the tree, and we have to attach these ancestors
+    # to the last existing parent in the tree. This means we must always have a
+    # reference to the root from which to start finding the common ancestor.
+    # The good news it I think this only needs to be done at the start of this,
+    # before we start the directory traversal, so we could still get the better
+    # performance.
 
     path_lst = []
     for dirpath, dirnames, filenames in os.walk(path):
@@ -318,21 +378,8 @@ def get_local_file_tree(path, local_file_name_tree = {}, status=None):
 
         for fname in filenames:
             abs_path = path_cat(dirpath, fname)
-
-            if os.path.isfile(abs_path):
-                modified_timestamp = datetime.fromtimestamp(os.path.getmtime(abs_path), timezone.utc)
-
-                hash_md5 = hashlib.md5()
-                with open(abs_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(4096), b""):
-                        hash_md5.update(chunk)
-
-                checksum = hash_md5.hexdigest()
-                node['c'][fname] = {'name':fname, 'md5Checksum':checksum, '_internal_modifiedTime':modified_timestamp}
-                print (f'A {checksum} - {path_cat(dirpath, fname)}')
-
-            else:
-                log_warning (status, f'Skipping unknown file type (link?): {abs_path}', echo=True)
+            if set_file_entry (node['c'], path_cat(dirpath, fname), fname=fname, status=status):
+                print (f'A {node["c"][fname]["md5Checksum"]} - {path_cat(dirpath, fname)}')
 
     return local_file_name_tree
 
@@ -406,24 +453,30 @@ def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, statu
             if modified_timestamp > old_nodes[fname]['_internal_modifiedTime']:
                 fpath = path_cat(abs_path, fname)
                 old_md5 = old_nodes[fname]['md5Checksum']
-                set_file_entry(old_nodes, fpath, fname=fname, f_stat=f_stat)
-                print (f'U {old_md5} -> {old_nodes[fname]["md5Checksum"]} - {fpath}')
+                if set_file_entry(old_nodes, fpath, fname=fname, f_stat=f_stat, status=status):
+                    print (f'U {old_md5} -> {old_nodes[fname]["md5Checksum"]} - {fpath}')
 
         for fname in added_dirs:
             get_local_file_tree (path_cat(abs_path, fname), local_file_name_tree, status=status)
 
         for fname in added_files:
             fpath = path_cat(abs_path, fname)
-            set_file_entry(old_nodes, fpath, f_stat=f_stat)
-            print (f'A {old_nodes[fname]["md5Checksum"]} - {fpath}')
+            if set_file_entry(old_nodes, fpath, status=status):
+                print (f'A {old_nodes[fname]["md5Checksum"]} - {fpath}')
 
 def update_local_file_name_tree():
+    status = Status()
+
     local_file_name_tree = pickle_load (local_file_tree_fname)
     for upstream_path, local_path in store_get(bindings_prop).items():
         info (f'L {local_path}')
         local_path_lst = path_as_list (local_path)
-        recursive_update_local_file_tree (local_path_lst, lookup_path(local_file_name_tree, local_path_lst), local_file_name_tree)
 
+        binding_root = lookup_path(local_file_name_tree, local_path_lst, silent=True)
+        assert binding_root != None
+        recursive_update_local_file_tree (local_path_lst, binding_root, local_file_name_tree, status=status)
+
+    print (status)
     pickle_dump (local_file_name_tree, local_file_tree_fname)
 
 def recursive_tree_compare(local, upstream, path_lst=[]):
@@ -515,6 +568,7 @@ def binding_add():
         # We could also support both, by adding some semantics to the trailing
         # '/', like rsync does. The problem is I never remember rsync's
         # semantics, I don't want that to happen here.
+        # :file_bindings
         local_path = path_cat(os.path.abspath(path_resolve(sys.argv[2])), '')
         upstream_path = path_cat(sys.argv[3], '')
     else:
@@ -558,6 +612,35 @@ def compare_local_dumps():
         children_count, file_count, *_ = recursive_tree_size(tree2['c']['home'])
         print (f'Tree 2 size: {file_count}/{children_count}')
 
+def print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree, bound_roots=None):
+    # TODO: Use a --verbose flag to force full output evenif subtrees are equal.
+
+    upstream_children_count, upstream_file_count, *_ = recursive_tree_size(upstream_subtree)
+    local_children_count, local_file_count, *_ = recursive_tree_size(local_subtree)
+
+    if bound_roots != None:
+        upstream_bound_children_count = 0
+        upstream_bound_file_count = 0
+        for bound_root in bound_roots:
+            upstream_subtree_root = lookup_path_subtree (upstream_subtree, path_as_list(bound_root))
+            c_count, f_count, *_ = recursive_tree_size(upstream_subtree_root)
+            upstream_bound_children_count += c_count
+            upstream_bound_file_count += f_count
+
+        upstream_children_count -= upstream_bound_children_count + len(bound_roots)
+        upstream_file_count -= upstream_bound_file_count
+
+
+    if children_count == upstream_children_count and children_count == local_children_count and \
+            checksum_count == upstream_file_count and checksum_count == local_file_count:
+        print(ecma_green("EQUAL"))
+    else:
+        print ()
+        print (f'Successful checksum comparisons: {checksum_count}')
+        print (f'Children name comparisons: {children_count}')
+        print (f'Upstream subtree size: {upstream_file_count}/{upstream_children_count}')
+        print (f'Local subtree size: {local_file_count}/{local_children_count}')
+
 def diff():
     if len(sys.argv) == 4:
         local_path = os.path.abspath(path_resolve(sys.argv[2]))
@@ -587,21 +670,15 @@ def diff():
         for fpath in missing_locally:
             print (f'Missing locally: {fpath}')
 
-        if len(missing_locally) + len(missing_upstream) + len(different) > 0:
-            print ()
-
-        print (f'Successful checksum comparisons: {checksum_count}')
-        print (f'Children name comparisons: {children_count}')
-        children_count, file_count, *_ = recursive_tree_size(upstream_subtree)
-        print (f'Upstream subtree size: {file_count}/{children_count}')
-        children_count, file_count, *_ = recursive_tree_size(local_subtree)
-        print (f'Local subtree size: {file_count}/{children_count}')
+        print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree)
 
     elif len(sys.argv) == 2:
         local_tree = pickle_load(local_file_tree_fname)
         upstream_tree = pickle_load(file_tree_fname)
 
         to_upload = {}
+        to_update = {}
+        to_remove = set()
         is_first = True
         bindings = store_get(bindings_prop)
         for upstream_path, local_path in bindings.items():
@@ -622,6 +699,7 @@ def diff():
             info (f"L '{local_path}'")
 
             for fpath in different:
+                to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
                 print (f'Different: {fpath}')
 
             for fpath in missing_upstream:
@@ -638,30 +716,55 @@ def diff():
                 # the upstream path to be terminated by '/'.
                 upstream_fpath = path_cat(upstream_path, fpath, '')
                 if upstream_fpath not in bindings.keys():
+                    to_remove.add(f'{path_cat(upstream_path, fpath)}')
                     print (f'Missing locally: {fpath}')
                     missing_locally.append (fpath)
                 else:
                     print (f'Bound Subtree: {fpath}')
                     contained_bound.add (canonical_path(path_cat(upstream_path,fpath)))
 
-            if len(tmp_missing_locally) + len(missing_upstream) + len(different) > 0:
-                print ()
+            print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree,
+                    bound_roots=contained_bound)
 
-            # TODO: Collapse output of equal subtrees but print full output for
-            # those different. Use a --verbose flag to force full output even
-            # if subtrees are equal.
-            print (f'{checksum_count}/{children_count} - successful comparisons (checksums/names)')
-            children_count, file_count, *_ = recursive_tree_size(upstream_subtree, skip=contained_bound)
-            print (f'{file_count}/{children_count} - upstream (files/nodes)')
-            children_count, file_count, *_ = recursive_tree_size(local_subtree, skip=contained_bound)
-            print (f'{file_count}/{children_count} - local (files/nodes)')
 
+        if len(to_upload) + len(to_remove) + len(to_update) > 0:
+            print()
+
+        py_literal_dump (to_upload, to_upload_fname)
         if len(to_upload) > 0:
-            py_literal_dump (to_upload, to_upload_fname)
-            print (f'\nAdded files to be uploaded to: {to_upload_fname}')
+            print (f'Added files to be uploaded to: {to_upload_fname}')
+
+        py_literal_dump (to_remove, to_remove_fname)
+        if len(to_remove) > 0:
+            print (f'Added files to be removed to: {to_remove_fname}')
+
+        py_literal_dump (to_update, to_update_fname)
+        if len(to_update) > 0:
+            print (f'Added files to be updated to: {to_update_fname}')
 
     else:
         print ('Invalid arguments.')
+
+def is_file_node(node):
+    return 'c' not in node.keys()
+
+def is_dir_node(node):
+    return 'c' in node.keys()
+
+def is_root_node(node):
+    return ('name' in node.keys() and node['name'] == 'My Drive') or 'name' not in node.keys()
+
+def remove_file(service, upstream_root, upstream_abs_path, status=None):
+    # Find file in upstream tree
+    path_lst = path_as_list(upstream_abs_path)
+    path_node = lookup_path (upstream_root, path_lst)
+
+    if path_node != None:
+        print (f"R {upstream_abs_path}")
+        request = service.files().delete(fileId=path_node['id']).execute()
+
+    else:
+        log_error (status, f"File deletion failed: {upstream_abs_path}")
 
 def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, status=None):
     if not os.path.isfile(local_abs_path):
@@ -669,44 +772,47 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, statu
         return
 
     # Find parent in upstream tree
-    has_error = False
     path_lst = path_as_list(upstream_abs_path)
     directory_path = path_lst[:-1]
-    node = upstream_root
+    parent_node = lookup_path (upstream_root, directory_path)
 
-    for dirname in directory_path:
-        if 'c' in node.keys() and dirname in node['c'].keys():
-            node = node['c'][dirname]
-        else:
-            log_error (status, f"Can't upload file because directory '{dirname}' doesn't exist upstream: {upstream_abs_path}\n")
-            has_error = True
-            break
-
-    if not has_error:
-        file_metadata = {'name': path_lst[-1], 'parents': [node['id']]}
+    if parent_node != None:
+        file_metadata = {'name': path_lst[-1], 'parents': [parent_node['id']]}
         data = MediaFileUpload(local_abs_path,
                 mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0],
                 resumable=True,
                 chunksize=1048576)
 
-        print (f"{local_abs_path} -> {upstream_abs_path}")
+        print (f"N {local_abs_path} -> {upstream_abs_path}")
 
-        print (f'[0%]', file=sys.stderr, end='')
         request = service.files().create(body=file_metadata, media_body=data)
-        response = None
-        while response is None:
-            try:
-                status, response = request.next_chunk()
-                if status:
-                    print (f'\r[{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
+        google.request_execute_cli(request)
 
-            except OSError:
-                response = None
-                print (f'\r', file=sys.stderr, end='')
-                print (f'Error uploading chunk. Retrying...')
-                print (f'[0%]', file=sys.stderr, end='')
+    else:
+        log_error (status, f"File upload failed, directory '{dirname}' doesn't exist upstream: {upstream_abs_path}")
 
-        print (f'\r', file=sys.stderr, end='')
+def update_file(service, local_abs_path, upstream_root, upstream_abs_path, status=None):
+    if not os.path.isfile(local_abs_path):
+        log_error (status, f"Can't update because it's not a file: {local_abs_path}")
+        return
+
+    # Find file in upstream tree
+    path_lst = path_as_list(upstream_abs_path)
+    path_node = lookup_path (upstream_root, path_lst)
+
+    if is_file_node(path_node) and path_node != None:
+        data = MediaFileUpload(local_abs_path,
+                mimetype=mimetypes.MimeTypes().guess_type(path_lst[-1])[0],
+                resumable=True,
+                chunksize=1048576)
+
+        print (f"C {local_abs_path} -> {upstream_abs_path}")
+
+        request = service.files().update(fileId=path_node['id'], media_body=data)
+        google.request_execute_cli(request)
+
+    else:
+        log_error (status, f"File update failed: {upstream_abs_path}")
 
 def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_abs_path):
     if not os.path.isdir(local_abs_path):
@@ -740,7 +846,7 @@ def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_ab
                                                    fields='id').execute()
             node = tree_new_child (node, create_folder.get('id', []), dir_name)
             parent_lst[0] = node['id']
-        print (f"In '{os.sep.join(path_lst[:missing_idx])}' created folder(s): {os.sep.join(path_lst[missing_idx:])}")
+        print (f"N {path_cat(upstream_abs_path, '')}")
 
 def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=None, status=None):
     """
@@ -799,6 +905,35 @@ def upload():
 
     else:
         print ('List of files to upload is empty.')
+
+def push():
+    stat = Status()
+    to_upload = py_literal_load (to_upload_fname)
+    to_update = py_literal_load (to_update_fname)
+    to_remove = py_literal_load (to_remove_fname)
+
+    if len(to_upload) > 0 or len(to_update) > 0:
+        upstream_tree = pickle_load(file_tree_fname)
+        upstream_root = upstream_tree['My Drive']
+
+        service = google.get_service()
+
+    if len(to_upload) > 0:
+        for local_abs_path, upstream_abs_path in to_upload.items():
+            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=stat)
+
+    if len(to_update) > 0:
+        for local_abs_path, upstream_abs_path in to_update.items():
+            update_file (service, local_abs_path, upstream_root, upstream_abs_path, status=stat)
+
+    if len(to_remove) > 0:
+        for upstream_abs_path in to_remove:
+            remove_file (service, upstream_root, upstream_abs_path, status=stat)
+
+    # Because the output can be very long, summarize all messages at
+    # the end
+    print (stat)
+    
 
 if __name__ == "__main__":
     # Everything above this line will be executed for each TAB press.
