@@ -22,6 +22,7 @@ to_upload_fname = 'to_upload'
 to_remove_fname = 'to_remove'
 to_update_fname = 'to_update'
 
+changes_token_prop = 'changes_token'
 bindings_prop = 'bindings'
 
 def default ():
@@ -82,6 +83,17 @@ def sequential_file_dump ():
                 parameters['pageToken'] = nextPage_token
 
     if success:
+        change_token = None
+        while change_token is None:
+            try:
+                change_token = google.get('https://www.googleapis.com/drive/v3/changes/startPageToken')
+            except Exception as e:
+                change_token = None
+                print ('Error while getting changes token.')
+                print (traceback.format_exc())
+                break
+        store (changes_token_prop, change_token['startPageToken'])
+
         # For some reason, the sequential file dump still misses some parents. Here
         # we iterate the dump and check that all parent IDs are resolved. I even
         # tried setting to true 'includeItemsFromAllDrives' and
@@ -124,32 +136,6 @@ def sequential_file_dump ():
 
     pickle_dump (files, file_dict_fname)
     print (f'Total: {len(files)}')
-
-def sequential_file_dump_update():
-    # TODO: Implement an update request to the file dump. Use the Changes API
-    # from google drive [1]. Save the next page token in the persistent store,
-    # then after each update get all changed files and update them in the file
-    # dictionary. Careful about this:
-    #
-    #  - Thrashed files are not really removed, they only get their 'thrashed'
-    #    attribute set to true.
-    #
-    #  - Information of permanently removed files can't be accessed anymore, so
-    #    the 'file' attrigute of the change object won't be present. The id of
-    #    the removed file will come in the 'fileId' attribute of the change
-    #    object. This will happen for example when the thrash bin is emptied.
-    #
-    #  - The ids parameter in the request should look similar to this
-    #       newStartPageToken,changes(fileId,changeType,removed,file(id,trashed,name,md5Checksum,parents))
-    # 
-    # Some things I haven't tried yet:
-    #
-    #  - What happens when thrashing/removing a subtree?, I would guess we get
-    #    a change object for each folder/file in it.
-    #  - What happens when files/subtrees are moved?.
-    #
-    # [1]: https://developers.google.com/drive/api/v3/reference/changes
-    pass
 
 def tree_file_dump ():
     parameters = {'fields':'nextPageToken,files(id,mimeType,name,md5Checksum,parents)', 'pageSize':1000, 'q':"'root' in parents"}
@@ -276,6 +262,8 @@ def path_as_list(path):
     # but
     #       ''.split() returns []
     # why?...
+    #
+    # This means "/".strip(os.sep) returns [''] not [], so we handle it as a separate case.
     return [] if path.strip(os.sep).strip() == '' else path.strip(os.sep).split(os.sep)
 
 def recursive_name_duplicates_print(path, node):
@@ -340,6 +328,15 @@ def set_file_entry(node_children, abs_path, fname=None, f_stat=None, status=None
 
     return success
 
+def ensure_tree_dirpath (path_lst, node):
+    assert is_dir_node(node), "Passing non directory root to ensure_tree_dirpath()"
+
+    for dirname in path_lst:
+        if dirname not in node['c'].keys():
+            node['c'][dirname] = {'name':dirname, 'c':{}}
+        node = node['c'][dirname]
+    return node
+
 def get_local_file_tree(path, local_file_name_tree = {}, status=None):
     # TODO: I thought I could change local_file_name_tree for a node which we
     # assume is the one pointed to by path.It would've made things faster
@@ -354,27 +351,24 @@ def get_local_file_tree(path, local_file_name_tree = {}, status=None):
     # reference to the root from which to start finding the common ancestor.
     # The good news it I think this only needs to be done at the start of this,
     # before we start the directory traversal, so we could still get the better
-    # performance.
+    # performance. As long as os.walk guarantees dirpath increases at most 1
+    # level each iteration.
+    if not os.path.isdir(path):
+        print (f"Trying to traverse something that isn't a directory: {path}")
+        return
 
     path_lst = []
     for dirpath, dirnames, filenames in os.walk(path):
         for dname in dirnames:
+            # Symlinks to directories are not followed by os.walk() by default,
+            # but they do show inside dirnames, we just notify the user they
+            # are being ignored.
             fpath = path_cat (dirpath, dname)
             if os.path.islink(fpath):
-                print (f'Ignoring link to directory {path_cat(fpath)}')
+                log_warning (status, f'Ignoring link to directory {path_cat(fpath)}')
 
-        path_lst = [dirname for dirname in dirpath.strip(os.sep).split(os.sep) if dirname != '.']
-        node = local_file_name_tree
-        for dirname in path_lst:
-            if 'c' not in node.keys():
-                node['c'] = {}
-
-            if dirname not in node['c'].keys():
-                node['c'][dirname] = {'name':dirname}
-
-            node = node['c'][dirname]
-        if 'c' not in node.keys():
-            node['c'] = {}
+        path_lst = path_as_list(dirpath)
+        node = ensure_tree_dirpath (path_lst, local_file_name_tree)
 
         for fname in filenames:
             abs_path = path_cat(dirpath, fname)
@@ -464,6 +458,33 @@ def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, statu
             if set_file_entry(old_nodes, fpath, status=status):
                 print (f'A {old_nodes[fname]["md5Checksum"]} - {fpath}')
 
+def update_upstream_file_name_tree():
+    # TODO: Implement an update request to the file dump. Use the Changes API
+    # from google drive [1]. Save the next page token in the persistent store,
+    # then after each update get all changed files and update them in the file
+    # dictionary. Careful about this:
+    #
+    #  - Thrashed files are not really removed, they only get their 'thrashed'
+    #    attribute set to true.
+    #
+    #  - Information of permanently removed files can't be accessed anymore, so
+    #    the 'file' attrigute of the change object won't be present. The id of
+    #    the removed file will come in the 'fileId' attribute of the change
+    #    object. This will happen for example when the thrash bin is emptied.
+    #
+    #  - The ids parameter in the request should look similar to this
+    #       newStartPageToken,changes(fileId,changeType,removed,file(id,trashed,name,md5Checksum,parents))
+    #
+    # Some things I haven't tried yet:
+    #
+    #  - What happens when thrashing/removing a subtree?, I would guess we get
+    #    a change object for each folder/file in it.
+    #  - What happens when files/subtrees are moved?.
+    #
+    # [1]: https://developers.google.com/drive/api/v3/reference/changes
+    pass
+
+
 def update_local_file_name_tree():
     status = Status()
 
@@ -474,6 +495,7 @@ def update_local_file_name_tree():
 
         binding_root = lookup_path(local_file_name_tree, local_path_lst, silent=True)
         assert binding_root != None
+        # :file_bindings would need a separate case.
         recursive_update_local_file_tree (local_path_lst, binding_root, local_file_name_tree, status=status)
 
     print (status)
@@ -575,9 +597,62 @@ def binding_add():
         print ('Missing arguments.')
         return
 
+    # Make sure the binding is new
+    # TODO: Implement binding update
     bindings = store_get(bindings_prop, default={})
-    bindings[upstream_path] = local_path
-    store(bindings_prop, bindings)
+    if upstream_path in bindings.keys():
+        if local_path == bindings[upstream_path]:
+            print (f"Binding already exists: '{local_path}' -> '{upstream_path}'")
+        else:
+            print (f"Upstream directory already bound: '{upstream_path}'")
+        return
+    elif local_path in {local_p for _, local_p in bindings.items()}:
+        print (f"Local directory already bound: '{local_path}'")
+        return
+
+    # The whole code keeps the invariant that binding folders always exist in
+    # both local and upstream trees. Here we make sure that's the case so we
+    # don't get failures later.
+    #
+    # NOTE: This means we need to explicitly handle the case of someone
+    # restoring their configuration manually. Either we need an explicit
+    # "reload_config" command, or everytime a tree cache is loaded we must make
+    # sure bound paths exist in the tree.
+    upstream_tree = pickle_load (file_tree_fname)['My Drive']
+
+    # Currently bindings can only be added to upload a directory
+    # TODO: Implement binding addition to download directories
+    upstream_tree_node = lookup_path (upstream_tree, path_as_list(upstream_path), silent=True)
+    if path_exists(local_path) and path_isdir(local_path) and upstream_tree_node == None:
+        local_file_name_tree = pickle_load (local_file_tree_fname)
+
+        path_lst = path_as_list(local_path)
+        local_tree_node = lookup_path (local_file_name_tree, path_lst, silent=True)
+        if local_tree_node == None:
+            ensure_tree_dirpath (path_lst, local_file_name_tree)
+            pickle_dump (local_file_name_tree, local_file_tree_fname)
+
+            service = google.get_service()
+            ensure_upstream_dir_path (service, local_path, upstream_tree, upstream_path)
+            # Should we upload the directory here? Right now we don't, user
+            # needs to update local and upstream trees, then call diff, then
+            # push.
+
+            bindings[upstream_path] = local_path
+            store(bindings_prop, bindings)
+
+        else:
+            print ("Invalid binding: local directory is already part of local file tree.")
+
+    elif not path_exists(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
+        print ("Bindings that download subtrees aren't yet implemented.")
+
+    elif path_exists(local_path) and path_isdir(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
+        print ("Bindings that merge subtrees aren't yet implemented.")
+
+    elif not path_exists(local_path) and upstream_tree_node == None:
+        print ("Bindings that create new empty local and upstream directories aren't yet implemented.")
+
 
 def binding_show():
     bindings = store_get(bindings_prop)
