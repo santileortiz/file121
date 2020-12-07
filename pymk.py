@@ -2,6 +2,7 @@
 from mkpy.utility import *
 import google_utility as google
 from datetime import datetime, timezone
+import dateutil.parser
 import hashlib
 import traceback
 import stat
@@ -40,7 +41,7 @@ def sequential_file_dump ():
     progress_flag_name = 'sequentialTraversalInProgress'
     is_in_progress = store_get(progress_flag_name, default=False) and not restart
 
-    parameters = {'fields':'nextPageToken,files(id,mimeType,name,md5Checksum,parents)', 'pageSize':1000, 'q':'trashed = false'}
+    parameters = {'fields':'nextPageToken,files(id,mimeType,modifiedTime,name,md5Checksum,parents)', 'pageSize':1000, 'q':'trashed = false'}
 
     success = False
     files = {}
@@ -65,6 +66,7 @@ def sequential_file_dump ():
                     if f_id in files:
                         # This should never happen
                         print (f'Found repeated ID {f_id}')
+                    f['_internal_modifiedTime'] = dateutil.parser.parse(f['modifiedTime'])
                     files[f_id] = f
 
                 print (f'Received: {len(json_data["files"])} ({json_data["files"][-1]["id"] if len(files) > 0 else ""})')
@@ -266,6 +268,27 @@ def path_as_list(path):
     # This means "/".strip(os.sep) returns [''] not [], so we handle it as a separate case.
     return [] if path.strip(os.sep).strip() == '' else path.strip(os.sep).split(os.sep)
 
+def recursive_name_duplicates_print_collect_removal(path, node, to_remove, sequential_file_dump):
+    if 'duplicateNames' in node.keys():
+        duplicate_ids = {id for id in node['duplicateNames']}
+        duplicate_ids.add(node['id'])
+
+        all_equal = True
+        oldest_id = node['id']
+        for id in duplicate_ids:
+            if sequential_file_dump[id]['_internal_modifiedTime'] < sequential_file_dump[oldest_id]['_internal_modifiedTime']:
+                oldest_id = id
+
+            if sequential_file_dump[id]['md5Checksum'] != sequential_file_dump[oldest_id]['md5Checksum']:
+                all_equal = False
+
+        duplicate_ids.remove(oldest_id)
+        to_remove[(path, oldest_id, all_equal)] = duplicate_ids
+
+    if 'c' in node.keys():
+        for name, child in node['c'].items():
+            recursive_name_duplicates_print_collect_removal(path_cat(path, name), child, to_remove, sequential_file_dump)
+
 def recursive_name_duplicates_print(path, node):
     if 'duplicateNames' in node.keys():
         print (path)
@@ -274,9 +297,9 @@ def recursive_name_duplicates_print(path, node):
         for name, child in node['c'].items():
             recursive_name_duplicates_print(path_cat(path, name), child)
 
-def find_name_duplicates():
+def show_name_duplicates():
     """
-    This snip receives an upstream path of a subtree and it prints all distinct
+    Receives an upstream path of a subtree and prints all distinct upstream
     files with duplicate names.
     """
     # NOTE: It's possible that we get duplicates while building the file name
@@ -291,7 +314,61 @@ def find_name_duplicates():
 
     file_name_tree = pickle_load (file_tree_fname)
     node = lookup_path (file_name_tree['My Drive'], path_lst)
-    recursive_name_duplicates_print(path, node)
+
+    if get_cli_bool_opt('--remove'):
+        file_dict = pickle_load (file_dict_fname)
+        to_remove = {}
+        recursive_name_duplicates_print_collect_removal(path, node, to_remove, file_dict)
+        print (to_remove)
+
+    else:
+        recursive_name_duplicates_print(path, node)
+
+def remove_name_duplicates():
+    """
+    Receives an upstream path of a subtree and removes all distinct upstream
+    files with duplicate names. It keeps the oldest version of a file.
+
+    Pass --dry-run to get a list of what would be deleted without actually doing so.
+    """
+    # NOTE: It's possible that we get duplicates while building the file name
+    # tree but not here. That's because the full file dump contains shared
+    # folders to, and here we assume the passed path has the user's 'My Drive'
+    # as root.
+
+    path = '/'
+    if len(sys.argv) >= 2:
+        path = sys.argv[2]
+    path_lst = path_as_list(path)
+
+    file_name_tree = pickle_load (file_tree_fname)
+    node = lookup_path (file_name_tree['My Drive'], path_lst)
+
+    file_dict = pickle_load (file_dict_fname)
+    to_remove = {}
+    recursive_name_duplicates_print_collect_removal(path, node, to_remove, file_dict)
+
+    is_first = True
+    service = google.get_service()
+    for kept, removed_ids in to_remove.items():
+        if not is_first:
+            print()
+        else:
+            is_first = False
+
+        equality = ecma_yellow('DIFFERENT')
+        if kept[2]:
+            equality = ecma_green('EQUAL')
+
+        print (f"{equality}")
+        info (f"U '{kept[0]}'")
+        print (f"Keeping '{kept[1]}'")
+        for file_id in removed_ids:
+            if not get_cli_bool_opt('--dry-run'):
+                remove_file_id (service, file_id)
+            print (f"R {file_id}")
+
+    # TODO: Update upstream tree
 
 def set_file_entry(node_children, abs_path, fname=None, f_stat=None, status=None):
     if f_stat == None:
@@ -637,6 +714,7 @@ def binding_add():
             # Should we upload the directory here? Right now we don't, user
             # needs to update local and upstream trees, then call diff, then
             # push.
+            # TODO: I think we shoudl at least update upstream and local trees automatically
 
             bindings[upstream_path] = local_path
             store(bindings_prop, bindings)
@@ -645,13 +723,13 @@ def binding_add():
             print ("Invalid binding: local directory is already part of local file tree.")
 
     elif not path_exists(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
-        print ("Bindings that download subtrees aren't yet implemented.")
+        print ("Bindings that download subtrees aren't implemented.")
 
     elif path_exists(local_path) and path_isdir(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
-        print ("Bindings that merge subtrees aren't yet implemented.")
+        print ("Bindings that merge subtrees aren't implemented.")
 
     elif not path_exists(local_path) and upstream_tree_node == None:
-        print ("Bindings that create new empty local and upstream directories aren't yet implemented.")
+        print ("Bindings that create new empty local and upstream directories aren't implemented.")
 
 
 def binding_show():
@@ -835,11 +913,13 @@ def remove_file(service, upstream_root, upstream_abs_path, status=None):
     path_node = lookup_path (upstream_root, path_lst)
 
     if path_node != None:
+        remove_file_id (service, path_node['id'])
         print (f"R {upstream_abs_path}")
-        request = service.files().delete(fileId=path_node['id']).execute()
-
     else:
         log_error (status, f"File deletion failed: {upstream_abs_path}")
+
+def remove_file_id(service, file_id):
+    request = service.files().delete(fileId=file_id).execute()
 
 def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, status=None):
     if not os.path.isfile(local_abs_path):
