@@ -1,0 +1,49 @@
+This is a list of test cases we should handle when implementin real tests
+
+Uploading:
+  - Upload file/directory
+      /testdir/file1 -> /testdir/file1
+      /testdir/directory1/ -> /testdir/directory1/
+
+  - Upload deep directory
+
+  - Upload file/directory and rename
+      /testdir/file1 -> /testdir/renamed_file1
+      /testdir/directory1/ -> /testdir/renamed_directory1/
+
+  - Fail to upload existing directory/file
+      /testdir/file1 -> /testdir/file1
+      /testdir/directory1/ -> /testdir/directory1/
+
+Bindings:
+  - Any binding that ends up with the same direcctory in 2 different places
+    upstream should be forbidden.
+
+    Local
+    base/
+     bound/
+      boundsubdir/
+     dir/
+      subdir
+      file
+
+    Upstream
+    base/
+     dir/
+      subdir/
+      file
+      bound/
+       boundsubdir/
+
+    The binding local:/base/bound/boundsubdir -> upstream:/base/dir/boundsubdir
+    is invalid because it would make it ambiguous where to place boundsubdir
+    upstream. It could be either at upstream:/base/dir/boundsubdir or
+    upstream:/base/bound/boundsubdir
+
+    I'm still not 100% clear on what are the minimal conditions to decide an
+    invalid binding.
+
+  - Create a binding for an existing local directory. Should trigger upload of
+    that directory to the appropriate place. As long as the directory doesn't
+    exist upstream. If the locally bound directory is part of a subtree that's
+    already uploaded, fail.
