@@ -6,6 +6,8 @@ file_dict*
 file_tree*
 local_file_tree*
 to_upload
+to_remove
+to_update
 
 *.swp
 *.log
