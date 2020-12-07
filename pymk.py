@@ -255,6 +255,7 @@ def lookup_path (root, path_lst, silent=False):
             node = None
             if not silent:
                 print (f"File doesn't exist: {curr_path}")
+            break
     return node
 
 def lookup_path_subtree (node, path_lst):
@@ -574,6 +575,7 @@ def update_upstream_file_name_tree():
 
     changed = False
     file_dict = pickle_load(file_dict_fname)
+    file_dict_old = file_dict.copy()
 
     while True:
         try:
@@ -595,7 +597,7 @@ def update_upstream_file_name_tree():
                     f_id = change["fileId"]
 
                     if f_id in file_dict.keys():
-                        path = get_file_path(file_dict, file_dict[f_id])
+                        path = get_file_path(file_dict_old, file_dict[f_id])
                         # NOTE: Thrashed files are not really removed, they only
                         # get their 'thrashed' attribute set to true.
                         if change['removed'] or change['file']['trashed']:
@@ -603,18 +605,24 @@ def update_upstream_file_name_tree():
                                 del file_dict[f_id]
                                 print(f'R {path}')
                         else:
-                            old_hash = file_dict[f_id]['md5Checksum']
                             f = change['file']
                             set_upstream_file_entry (file_dict, f)
-                            print(f'U {old_hash} -> {f["md5Checksum"]} - {path}')
+                            if 'md5Checksum' not in f.keys():
+                                print(f'U {path}')
+                            else:
+                                old_hash = file_dict[f_id]['md5Checksum']
+                                print(f'U {old_hash} -> {f["md5Checksum"]} - {path}')
                     else:
-                        f = change['file']
-                        set_upstream_file_entry (file_dict, f)
-                        path = get_file_path(file_dict, file_dict[f_id])
-                        if 'md5Checksum' not in f.keys():
-                            print(f'A {path}')
+                        if 'file' in change.keys():
+                            f = change['file']
+                            path = get_file_path(file_dict, file_dict[f_id])
+                            set_upstream_file_entry (file_dict, f)
+                            if 'md5Checksum' not in f.keys():
+                                print(f'A {path}')
+                            else:
+                                print(f'A {f["md5Checksum"]} - {path}')
                         else:
-                            print(f'A {f["md5Checksum"]} - {path}')
+                            print(f'? {f_id}')
             else:
                 store(changes_token_prop, next_token)
                 break
@@ -711,6 +719,28 @@ def recursive_tree_size(node, path='', skip=set()):
             file_list.append(path_cat(path, node['name']))
             file_count += 1
     return count, file_count, file_list
+
+def binding_remove():
+    if len(sys.argv) > 2:
+        upstream_path = path_cat(sys.argv[2], '')
+    else:
+        print ('Missing arguments.')
+        return
+
+    bindings = store_get(bindings_prop, default={})
+    local_path = bindings[upstream_path]
+    local_file_name_tree = pickle_load (local_file_tree_fname)
+
+    path_lst = path_as_list(local_path)
+    node = lookup_path (local_file_name_tree, path_lst)
+    parent = lookup_path (local_file_name_tree, path_lst[:-1])
+    children = parent['c']
+
+    del children[node['name']]
+    pickle_dump (local_file_name_tree, local_file_tree_fname)
+
+    del bindings[upstream_path]
+    store(bindings_prop, bindings)
 
 def binding_add():
     if len(sys.argv) > 2:
@@ -930,6 +960,18 @@ def diff():
             for fpath in tmp_missing_locally:
                 # TODO: When we support binding files upstream, we shouldn't force
                 # the upstream path to be terminated by '/'.
+
+                # FIXME: Let's say we have binding A that has a bound subtree
+                # B, if B's immediate parent is missing from A's subtree, it
+                # will be marked for removal because the path to the parent
+                # isn't exactly a key of the bindings map.
+                #
+                # Also, if we have a full path missing, like /A/B/C, the tree
+                # comparison should report the minimal set of nodes that
+                # represent it. If all A, B and C are empty (besides it's
+                # immediate file), only A should be present as missing, not all
+                # 3 directories. How we handle this will affect the fix for the
+                # problem above.
                 upstream_fpath = path_cat(upstream_path, fpath, '')
                 if upstream_fpath not in bindings.keys():
                     to_remove.add(f'{path_cat(upstream_path, fpath)}')
