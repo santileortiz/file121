@@ -1125,6 +1125,13 @@ def upload():
         print ('List of files to upload is empty.')
 
 def push():
+    # TODO: Make all of this process less verbose and have a consistent CLI
+    # output.
+
+    update_upstream_file_name_tree()
+    update_local_file_name_tree()
+    diff()
+
     stat = Status()
     to_upload = py_literal_load (to_upload_fname)
     to_update = py_literal_load (to_update_fname)
@@ -1147,6 +1154,8 @@ def push():
     if len(to_remove) > 0:
         for upstream_abs_path in to_remove:
             remove_file (service, upstream_root, upstream_abs_path, status=stat)
+
+    update_upstream_file_name_tree()
 
     # Because the output can be very long, summarize all messages at
     # the end
