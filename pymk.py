@@ -30,6 +30,64 @@ def default ():
     target = store_get ('last_snip', default='example_procedure')
     call_user_function(target)
 
+def set_upstream_file_entry(file_dict, file_resource):
+    file_resource['_internal_modifiedTime'] = dateutil.parser.parse(file_resource['modifiedTime'])
+    file_dict[file_resource['id']] = file_resource
+
+def get_file_path(file_dict, node):
+    path = []
+    while not is_root_node(node):
+        path.append(node['name'])
+
+        # Advance to first parent. This will only return "a" path, but in Drive
+        # a file can have multiple of them.
+        node = file_dict[node['parents'][0]]
+
+    path.reverse()
+    return os.sep + os.sep.join(path)
+
+def get_ghost_files(file_dict):
+    # For some reason, the sequential file dump still misses some parents. Here
+    # we iterate the dump and check that all parent IDs are resolved. I even
+    # tried setting to true 'includeItemsFromAllDrives' and
+    # 'supportsAllDrives', it didn't work.
+    #
+    # Looks like the problem happens when permanently removig directories.
+    # The subtree for it isn't deleted immediately, so it's possible to get
+    # a full dump and still have elements that shouldn't be there anymore.
+    ghost_files = {}
+    for f_id, f in file_dict.items():
+        if 'parents' in f.keys():
+            for parent_id in f['parents']:
+                if parent_id not in file_dict.keys() and parent_id not in file_dict.keys():
+                    ghost_files[parent_id] = f_id
+
+    # Get data of all ghost files and their ancestors
+    #
+    # TODO: Maybe these files should be specially marked, like "ghost" files?.
+    for f_id, child in ghost_files.items():
+        try:
+            f = google.get(f'https://www.googleapis.com/drive/v3/files/{f_id}')
+        except:
+            print ('Failed to get parent file {f_id}')
+            # TODO: Maybe if this happens, the correct solution is
+            # to remove the parent reference from the file, so the
+            # tree can be built "normally"?. It's possible we will
+            # end up adding stuff to the root that's not supposed
+            # to be there...
+
+        if f != None:
+            file_dict[f_id] = f
+            if 'parents' in f.keys():
+                for parent_id in f['parents']:
+                    if parent_id not in file_dict.keys() and parent_id not in ghost_files:
+                        ghost_files.add(parent_id)
+            print (f'Added ghost file {f_id}')
+
+        else:
+            print (f'Failed to get parent {f_id} of {ghost_files[f_id]}')
+
+
 def sequential_file_dump ():
     """
     This requests all file information from google drive and dumps it into a
@@ -66,8 +124,7 @@ def sequential_file_dump ():
                     if f_id in files:
                         # This should never happen
                         print (f'Found repeated ID {f_id}')
-                    f['_internal_modifiedTime'] = dateutil.parser.parse(f['modifiedTime'])
-                    files[f_id] = f
+                    add_upstream_file_entry(files, f)
 
                 print (f'Received: {len(json_data["files"])} ({json_data["files"][-1]["id"] if len(files) > 0 else ""})')
             else:
@@ -85,6 +142,7 @@ def sequential_file_dump ():
                 parameters['pageToken'] = nextPage_token
 
     if success:
+        # Get last change token
         change_token = None
         while change_token is None:
             try:
@@ -96,45 +154,7 @@ def sequential_file_dump ():
                 break
         store (changes_token_prop, change_token['startPageToken'])
 
-        # For some reason, the sequential file dump still misses some parents. Here
-        # we iterate the dump and check that all parent IDs are resolved. I even
-        # tried setting to true 'includeItemsFromAllDrives' and
-        # 'supportsAllDrives', it didn't work.
-        #
-        # Looks like the problem happens when permanently removig directories.
-        # The subtree for it isn't deleted immediately, so it's possible to get
-        # a full dump and still have elements that shouldn't be there anymore.
-        ghost_files = {}
-        for f_id, f in files.items():
-            if 'parents' in f.keys():
-                for parent_id in f['parents']:
-                    if parent_id not in files.keys() and parent_id not in files.keys():
-                        ghost_files[parent_id] = f_id
-
-        # Get data of all ghost files and their ancestors
-        #
-        # TODO: Maybe these files should be specially marked, like "ghost" files?.
-        for f_id, child in ghost_files.items():
-            try:
-                f = google.get(f'https://www.googleapis.com/drive/v3/files/{f_id}')
-            except:
-                print ('Failed to get parent file {f_id}')
-                # TODO: Maybe if this happens, the correct solution is
-                # to remove the parent reference from the file, so the
-                # tree can be built "normally"?. It's possible we will
-                # end up adding stuff to the root that's not supposed
-                # to be there...
-
-            if f != None:
-                files[f_id] = f
-                if 'parents' in f.keys():
-                    for parent_id in f['parents']:
-                        if parent_id not in files.keys() and parent_id not in ghost_files:
-                            ghost_files.add(parent_id)
-                print (f'Added ghost file {f_id}')
-
-            else:
-                print (f'Failed to get parent {f_id} of {ghost_files[f_id]}')
+        get_ghost_files(files)
 
     pickle_dump (files, file_dict_fname)
     print (f'Total: {len(files)}')
@@ -536,31 +556,73 @@ def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, statu
                 print (f'A {old_nodes[fname]["md5Checksum"]} - {fpath}')
 
 def update_upstream_file_name_tree():
-    # TODO: Implement an update request to the file dump. Use the Changes API
-    # from google drive [1]. Save the next page token in the persistent store,
-    # then after each update get all changed files and update them in the file
-    # dictionary. Careful about this:
-    #
-    #  - Thrashed files are not really removed, they only get their 'thrashed'
-    #    attribute set to true.
-    #
-    #  - Information of permanently removed files can't be accessed anymore, so
-    #    the 'file' attrigute of the change object won't be present. The id of
-    #    the removed file will come in the 'fileId' attribute of the change
-    #    object. This will happen for example when the thrash bin is emptied.
-    #
-    #  - The ids parameter in the request should look similar to this
-    #       newStartPageToken,changes(fileId,changeType,removed,file(id,trashed,name,md5Checksum,parents))
-    #
-    # Some things I haven't tried yet:
-    #
+    # TODO: Test these cases:
     #  - What happens when thrashing/removing a subtree?, I would guess we get
     #    a change object for each folder/file in it.
     #  - What happens when files/subtrees are moved?.
-    #
-    # [1]: https://developers.google.com/drive/api/v3/reference/changes
-    pass
 
+
+    #  Information of permanently removed files can't be accessed anymore, so
+    #  the 'file' attribute of the change object won't be present. The id of
+    #  the removed file will come in the 'fileId' attribute of the change
+    #  object. This will happen for example when the thrash bin is emptied.
+    #
+    #  This is why we don't filter out thrashed files here, like we do in
+    #  sequential_file_dump().
+    parameters = {'fields':'newStartPageToken,changes(fileId,changeType,removed,file(id,name,mimeType,modifiedTime,md5Checksum,parents,trashed))', 'pageSize':1000}
+    parameters['pageToken'] = store_get(changes_token_prop)
+
+    changed = False
+    file_dict = pickle_load(file_dict_fname)
+
+    while True:
+        try:
+            json_data = google.get('https://www.googleapis.com/drive/v3/changes', params=parameters)
+        except Exception as e:
+            print ('Error while performing request to Google, dump can be restarted by re running the command.')
+            print (traceback.format_exc())
+            store(progress_flag_name, True)
+            break
+
+        if json_data != None:
+            changes = json_data['changes']
+            next_token = json_data['newStartPageToken']
+            parameters['pageToken'] = next_token
+
+            if len(changes) > 0:
+                changed = True
+                for change in changes:
+                    f_id = change["fileId"]
+
+                    if f_id in file_dict.keys():
+                        path = get_file_path(file_dict, file_dict[f_id])
+                        # NOTE: Thrashed files are not really removed, they only
+                        # get their 'thrashed' attribute set to true.
+                        if change['removed'] or change['file']['trashed']:
+                            if f_id in file_dict.keys():
+                                del file_dict[f_id]
+                                print(f'R {path}')
+                        else:
+                            old_hash = file_dict[f_id]['md5Checksum']
+                            f = change['file']
+                            set_upstream_file_entry (file_dict, f)
+                            print(f'U {old_hash} -> {f["md5Checksum"]} - {path}')
+                    else:
+                        f = change['file']
+                        set_upstream_file_entry (file_dict, f)
+                        path = get_file_path(file_dict, file_dict[f_id])
+                        if 'md5Checksum' not in f.keys():
+                            print(f'A {path}')
+                        else:
+                            print(f'A {f["md5Checksum"]} - {path}')
+            else:
+                store(changes_token_prop, next_token)
+                break
+
+    if changed:
+        get_ghost_files(file_dict)
+        pickle_dump (file_dict, file_dict_fname)
+        build_file_name_tree()
 
 def update_local_file_name_tree():
     status = Status()
@@ -712,12 +774,13 @@ def binding_add():
             service = google.get_service()
             ensure_upstream_dir_path (service, local_path, upstream_tree, upstream_path)
             # Should we upload the directory here? Right now we don't, user
-            # needs to update local and upstream trees, then call diff, then
-            # push.
-            # TODO: I think we shoudl at least update upstream and local trees automatically
+            # needs to call diff, then push.
 
             bindings[upstream_path] = local_path
             store(bindings_prop, bindings)
+
+            update_local_file_name_tree()
+            update_upstream_file_name_tree()
 
         else:
             print ("Invalid binding: local directory is already part of local file tree.")
@@ -887,7 +950,7 @@ def diff():
         if len(to_upload) > 0:
             print (f'Added files to be uploaded to: {to_upload_fname}')
 
-        py_literal_dump (to_remove, to_remove_fname)
+        py_literal_dump (list(to_remove), to_remove_fname)
         if len(to_remove) > 0:
             print (f'Added files to be removed to: {to_remove_fname}')
 

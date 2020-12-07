@@ -162,18 +162,20 @@ def get_service():
     return build('drive', 'v3', credentials=creds)
 
 def request_execute_cli(request):
-    print (f'[0%]', file=sys.stderr, end='')
+    # NOTE: The cursor is at the beginning, I leave one space character so it
+    # doesn't overlap the text.
+    print (f' [0%]', file=sys.stderr, end='')
     response = None
     while response is None:
         try:
             status, response = request.next_chunk()
             if status:
-                print (f'\r[{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
+                print (f'\r [{status.progress() * 100:.2f}%]', file=sys.stderr, end='')
 
         except OSError:
             response = None
             print (f'\r', file=sys.stderr, end='')
             print (f'Error uploading chunk. Retrying...')
-            print (f'[0%]', file=sys.stderr, end='')
+            print (f' [0%]', file=sys.stderr, end='')
 
         print (f'\r', file=sys.stderr, end='')
