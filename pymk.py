@@ -615,12 +615,29 @@ def update_upstream_file_name_tree():
                     else:
                         if 'file' in change.keys():
                             f = change['file']
-                            path = get_file_path(file_dict, file_dict[f_id])
                             set_upstream_file_entry (file_dict, f)
-                            if 'md5Checksum' not in f.keys():
-                                print(f'A {path}')
+
+                            # TODO: Why can't we always compute the path of a
+                            # changed file?, I think this logic has become
+                            # quite ugly. I think the issue was I was calling
+                            # set_upstream_file_entry() after this. If we never
+                            # hit the old or the ID case, remove them.
+                            if f_id in file_dict.keys():
+                                node = file_dict[f_id]
+                            elif f_id in file_dict_old.keys():
+                                node = file_dict_old[f_id]
                             else:
-                                print(f'A {f["md5Checksum"]} - {path}')
+                                node = None
+
+                            if node != None:
+                                node_str = get_file_path(file_dict, file_dict[f_id])
+                            else:
+                                node_str = "ID:" + f_id
+
+                            if 'md5Checksum' not in f.keys():
+                                print(f'A {node_str}')
+                            else:
+                                print(f'A {f["md5Checksum"]} - {node_str}')
                         else:
                             print(f'? {f_id}')
             else:
