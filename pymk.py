@@ -35,16 +35,26 @@ def set_upstream_file_entry(file_dict, file_resource):
     file_dict[file_resource['id']] = file_resource
 
 def get_file_path(file_dict, node):
+    error = False
     path = []
     while not is_root_node(node):
         path.append(node['name'])
 
         # Advance to first parent. This will only return "a" path, but in Drive
         # a file can have multiple of them.
-        node = file_dict[node['parents'][0]]
+        if 'parents' in node.keys():
+            node = file_dict[node['parents'][0]]
+        else:
+            if not is_root_node(node):
+                error = True
+            break
 
-    path.reverse()
-    return os.sep + os.sep.join(path)
+    if not error:
+        path.reverse()
+        ret = os.sep + os.sep.join(path)
+    else:
+        ret = None
+    return ret
 
 def get_ghost_files(file_dict):
     # For some reason, the sequential file dump still misses some parents. Here
@@ -124,7 +134,7 @@ def sequential_file_dump ():
                     if f_id in files:
                         # This should never happen
                         print (f'Found repeated ID {f_id}')
-                    add_upstream_file_entry(files, f)
+                    set_upstream_file_entry(files, f)
 
                 print (f'Received: {len(json_data["files"])} ({json_data["files"][-1]["id"] if len(files) > 0 else ""})')
             else:
@@ -300,7 +310,23 @@ def recursive_name_duplicates_print_collect_removal(path, node, to_remove, seque
             if sequential_file_dump[id]['_internal_modifiedTime'] < sequential_file_dump[oldest_id]['_internal_modifiedTime']:
                 oldest_id = id
 
-            if sequential_file_dump[id]['md5Checksum'] != sequential_file_dump[oldest_id]['md5Checksum']:
+            if is_file_node(sequential_file_dump[id]) and is_file_node(sequential_file_dump[oldest_id]):
+                if sequential_file_dump[id]['md5Checksum'] != sequential_file_dump[oldest_id]['md5Checksum']:
+                    all_equal = False
+
+            elif is_dir_node(sequential_file_dump[id]) and is_dir_node(sequential_file_dump[oldest_id]):
+                # TODO: We need a unified file tree structure that allows
+                # indexing by ID and getting all children. Then we should be
+                # able to compare the name-named directories with code like the
+                # one below. Then we can be sure it's safe to delete them. For
+                # now, just warn that this may not be safe.
+                all_equal = False
+
+                #missing_2, missing_1, different, checksum_count, children_count = \
+                #    recursive_tree_compare(sequential_file_dump[id], sequential_file_dump[oldest_id])
+                #if len(missing_1) + len(missing_2) + len(different) > 0:
+                #    all_equal = False
+            else:
                 all_equal = False
 
         duplicate_ids.remove(oldest_id)
@@ -329,7 +355,7 @@ def show_name_duplicates():
     # as root.
 
     path = '/'
-    if len(sys.argv) >= 2:
+    if len(sys.argv) > 2:
         path = sys.argv[2]
     path_lst = path_as_list(path)
 
@@ -556,6 +582,24 @@ def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, statu
             if set_file_entry(old_nodes, fpath, status=status):
                 print (f'A {old_nodes[fname]["md5Checksum"]} - {fpath}')
 
+def get_file_by_id():
+    if len(sys.argv) > 2:
+        f_id = sys.argv[2]
+    else:
+        print ('Missing arguments.')
+        return
+
+    file_dict = pickle_load(file_dict_fname)
+    if f_id in file_dict.keys():
+        f = file_dict[f_id]
+        if is_root_node(f):
+            print ('(root)')
+        for attr in f.keys():
+            print (f'{attr}: {f[attr]}')
+    else:
+        print ('File id not found: {f_id}')
+
+
 def update_upstream_file_name_tree():
     # TODO: Test these cases:
     #  - What happens when thrashing/removing a subtree?, I would guess we get
@@ -596,50 +640,49 @@ def update_upstream_file_name_tree():
                 for change in changes:
                     f_id = change["fileId"]
 
-                    if f_id in file_dict.keys():
-                        path = get_file_path(file_dict_old, file_dict[f_id])
-                        # NOTE: Thrashed files are not really removed, they only
-                        # get their 'thrashed' attribute set to true.
-                        if change['removed'] or change['file']['trashed']:
-                            if f_id in file_dict.keys():
-                                del file_dict[f_id]
-                                print(f'R {path}')
+                    # NOTE: Thrashed files are not really removed, they only
+                    # get their 'thrashed' attribute set to true.
+                    if change['removed'] or ('file' in change.keys() and change['file']['trashed']):
+                        if f_id in file_dict_old.keys():
+                            path = get_file_path(file_dict_old, file_dict_old[f_id])
                         else:
-                            f = change['file']
-                            set_upstream_file_entry (file_dict, f)
-                            if 'md5Checksum' not in f.keys():
-                                print(f'U {path}')
+                            path = change
+
+                        if f_id in file_dict.keys():
+                            del file_dict[f_id]
+                            print(f'R {path}')
+                        else:
+                            print(f'R? {path}')
+
+                    elif 'file' in change.keys():
+                        f = change['file']
+                        set_upstream_file_entry (file_dict, f)
+                        path = get_file_path(file_dict, file_dict[f_id])
+
+                        if path != None:
+                            if f_id in file_dict_old.keys():
+                                if 'md5Checksum' not in f.keys():
+                                    print(f'U {path}')
+                                else:
+                                    old_hash = file_dict_old[f_id]['md5Checksum']
+                                    print(f'U {old_hash} -> {f["md5Checksum"]} - {path}')
+
                             else:
-                                old_hash = file_dict[f_id]['md5Checksum']
-                                print(f'U {old_hash} -> {f["md5Checksum"]} - {path}')
+                                if 'md5Checksum' not in f.keys():
+                                    print(f'N {path}')
+                                else:
+                                    print(f'N {f["md5Checksum"]} - {path}')
+
+                        else:
+                            # This will happen when a file shared with the user
+                            # is updated. These files are outside of the 'My
+                            # Drive' directory which is what we conside to be
+                            # the upstream root.
+                            print (f'? {change}')
+
                     else:
-                        if 'file' in change.keys():
-                            f = change['file']
-                            set_upstream_file_entry (file_dict, f)
+                        print (f'? {change}')
 
-                            # TODO: Why can't we always compute the path of a
-                            # changed file?, I think this logic has become
-                            # quite ugly. I think the issue was I was calling
-                            # set_upstream_file_entry() after this. If we never
-                            # hit the old or the ID case, remove them.
-                            if f_id in file_dict.keys():
-                                node = file_dict[f_id]
-                            elif f_id in file_dict_old.keys():
-                                node = file_dict_old[f_id]
-                            else:
-                                node = None
-
-                            if node != None:
-                                node_str = get_file_path(file_dict, file_dict[f_id])
-                            else:
-                                node_str = "ID:" + f_id
-
-                            if 'md5Checksum' not in f.keys():
-                                print(f'A {node_str}')
-                            else:
-                                print(f'A {f["md5Checksum"]} - {node_str}')
-                        else:
-                            print(f'? {f_id}')
             else:
                 store(changes_token_prop, next_token)
                 break
@@ -1021,10 +1064,16 @@ def diff():
         print ('Invalid arguments.')
 
 def is_file_node(node):
-    return 'c' not in node.keys()
+    ret = 'c' not in node.keys()
+    if 'mimeType' in node.keys():
+        ret = node['mimeType'] != 'application/vnd.google-apps.folder'
+    return ret
 
 def is_dir_node(node):
-    return 'c' in node.keys()
+    ret = 'c' in node.keys()
+    if 'mimeType' in node.keys():
+        ret = node['mimeType'] == 'application/vnd.google-apps.folder'
+    return ret
 
 def is_root_node(node):
     return ('name' in node.keys() and node['name'] == 'My Drive') or 'name' not in node.keys()
