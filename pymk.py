@@ -12,19 +12,59 @@ from googleapiclient.http import MediaFileUpload
 
 import pdb
 
+# This directory contains files that can be regenerated somehow. Users
+# shouldn't try backing up things in here, it shouldn't be necessary.
+cache_dir = os.path.abspath(path_resolve('~/.cache/file121'))
+ensure_dir(cache_dir)
+
+# This directory contains all user data. This is users should back up.
+base_dir = os.path.abspath(path_resolve('~/.file121'))
+ensure_dir(base_dir)
+
 # TODO: Unify file_dict and file_tree into a single file. Create a common type
 # of datastructure for local and upstream tree files.
-file_dict_fname = 'file_dict'
-file_tree_fname = 'file_tree'
-local_file_tree_fname = 'local_file_tree'
-abs_local_file_tree_fname = os.path.abspath(path_resolve(local_file_tree_fname))
+upstream_file_dict_fname = path_cat (cache_dir, 'upstream_file_dict')
+upstream_file_tree_fname = path_cat (cache_dir, 'upstream_file_tree')
+local_file_tree_fname    = path_cat (cache_dir, 'local_file_tree')
 
+# TODO: Probably stop using files for this, instead just have a function that
+# returns these structures.
 to_upload_fname = 'to_upload'
 to_remove_fname = 'to_remove'
 to_update_fname = 'to_update'
 
 changes_token_prop = 'changes_token'
 bindings_prop = 'bindings'
+
+def load_upstream_file_dict():
+    return pickle_load (upstream_file_dict_fname)
+
+def store_upstream_file_dict(file_dict):
+    return pickle_dump (file_dict, upstream_file_dict_fname)
+
+def load_upstream_tree():
+    # NOTE: Upstream file structure has user's data inside the 'My Drive'
+    # directory, things outside of it are created by someone else and shared
+    # with the user. Even though we store all upstream file information (to at
+    # least detect changes to shared files and ignore them), we asssume
+    # 'My Drive' is the root of the upstream tree. Management of shared files
+    # is not implemented.
+    return pickle_load (upstream_file_tree_fname)['My Drive']
+
+def store_upstream_tree(real_root):
+    # CAUTION: Don't pass the root returned by load_upstream_tree()!!!! That's
+    # not the REAL upstream root, it's the 'My Drive' directory.
+    # TODO: When we get a real intermetiate data structure for file trees, this
+    # shuld be hidden by the API. It should be possible to load the upstream
+    # tree, modify it, then dump it back again to a file.
+    pickle_dump (real_root, upstream_file_tree_fname)
+
+def load_local_tree():
+    return pickle_load (local_file_tree_fname)
+
+def store_local_tree(root):
+    return pickle_dump (root, local_file_tree_fname)
+
 
 def default ():
     target = store_get ('last_snip', default='example_procedure')
@@ -116,7 +156,7 @@ def sequential_file_dump ():
     if is_in_progress:
         print ('Detected partially complete dump, restarting using stored page token.')
         parameters['pageToken'] = store_get('nextPageToken')
-        files = pickle_load (file_dict_fname)
+        files = load_upstream_file_dict()
 
     while True:
         try:
@@ -166,7 +206,7 @@ def sequential_file_dump ():
 
         get_ghost_files(files)
 
-    pickle_dump (files, file_dict_fname)
+    store_upstream_file_dict (files)
     print (f'Total: {len(files)}')
 
 def tree_file_dump ():
@@ -178,9 +218,9 @@ def tree_file_dump ():
     # failed request, because we need to keep the partial state from before, in
     # order to resume the tree traversal from the same place where we left.
 
-    files = []
+    files = {}
 
-    pickle_dump (files, 'full_file_dump')
+    store_upstream_file_dict (files)
     print (f'Total: {len(files)}')
 
 def recursive_tree_print(node, indent=''):
@@ -232,7 +272,7 @@ def build_file_name_tree():
     # TODO: Implement this as a tree traversal
     # TODO: Implement a version of this that considers names equal in a case
     # insensitive way.
-    file_dict = pickle_load (file_dict_fname)
+    file_dict = load_upstream_file_dict()
 
     root = {}
     for f_id, f in file_dict.items():
@@ -252,7 +292,7 @@ def build_file_name_tree():
         else:
             root[f['name']] = f
 
-    pickle_dump (root, file_tree_fname)
+    store_upstream_tree(root)
 
 def lookup_path (root, path_lst, silent=False):
     curr_path = ''
@@ -349,21 +389,15 @@ def show_name_duplicates():
     Receives an upstream path of a subtree and prints all distinct upstream
     files with duplicate names.
     """
-    # NOTE: It's possible that we get duplicates while building the file name
-    # tree but not here. That's because the full file dump contains shared
-    # folders to, and here we assume the passed path has the user's 'My Drive'
-    # as root.
-
     path = '/'
     if len(sys.argv) > 2:
         path = sys.argv[2]
     path_lst = path_as_list(path)
 
-    file_name_tree = pickle_load (file_tree_fname)
-    node = lookup_path (file_name_tree['My Drive'], path_lst)
+    node = lookup_path (load_upstream_tree(), path_lst)
 
     if get_cli_bool_opt('--remove'):
-        file_dict = pickle_load (file_dict_fname)
+        file_dict = load_upstream_file_dict()
         to_remove = {}
         recursive_name_duplicates_print_collect_removal(path, node, to_remove, file_dict)
         print (to_remove)
@@ -378,20 +412,15 @@ def remove_name_duplicates():
 
     Pass --dry-run to get a list of what would be deleted without actually doing so.
     """
-    # NOTE: It's possible that we get duplicates while building the file name
-    # tree but not here. That's because the full file dump contains shared
-    # folders to, and here we assume the passed path has the user's 'My Drive'
-    # as root.
-
     path = '/'
     if len(sys.argv) >= 2:
         path = sys.argv[2]
     path_lst = path_as_list(path)
 
-    file_name_tree = pickle_load (file_tree_fname)
-    node = lookup_path (file_name_tree['My Drive'], path_lst)
+    file_name_tree = load_upstream_tree()
+    node = lookup_path (file_name_tree, path_lst)
 
-    file_dict = pickle_load (file_dict_fname)
+    file_dict = load_upstream_file_dict()
     to_remove = {}
     recursive_name_duplicates_print_collect_removal(path, node, to_remove, file_dict)
 
@@ -426,7 +455,7 @@ def set_file_entry(node_children, abs_path, fname=None, f_stat=None, status=None
 
     success = False
     if stat.S_ISREG(f_stat.st_mode):
-        if abs_path != abs_local_file_tree_fname:
+        if abs_path != local_file_tree_fname:
             hash_md5 = hashlib.md5()
             with open(abs_path, "rb") as f:
                 for chunk in iter(lambda: f.read(4096), b""):
@@ -508,25 +537,26 @@ def set_3_way_operate(set1, set2):
 
 
 def build_local_file_name_tree():
-    stat = Status()
+    status = Status()
 
-    if len(sys.argv) > 2:
+    if len(sys.argv) > 3:
         path = sys.argv[2]
         path = os.path.abspath(path_resolve(path))
+        out_path = sys.argv[3]
 
-        local_file_name_tree = get_local_file_tree(path, status=stat)
-        pickle_dump (local_file_name_tree, local_file_tree_fname)
+        local_file_name_tree = get_local_file_tree(path, status=status)
+        pickle_dump (local_file_name_tree, out_path)
 
     else:
         local_file_name_tree = {}
         for upstream_path, local_path in store_get(bindings_prop).items():
             info (f'L {local_path}')
-            get_local_file_tree (local_path, local_file_name_tree=local_file_name_tree, status=stat)
+            get_local_file_tree (local_path, local_file_name_tree=local_file_name_tree, status=status)
 
-        pickle_dump (local_file_name_tree, local_file_tree_fname)
+        store_local_tree (local_file_name_tree)
 
     print()
-    print (stat)
+    print (status)
 
 def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, status=None):
     abs_path = os.sep + os.sep.join(path_lst)
@@ -589,7 +619,7 @@ def get_file_by_id():
         print ('Missing arguments.')
         return
 
-    file_dict = pickle_load(file_dict_fname)
+    file_dict = load_upstream_file_dict()
     if f_id in file_dict.keys():
         f = file_dict[f_id]
         if is_root_node(f):
@@ -618,7 +648,7 @@ def update_upstream_file_name_tree():
     parameters['pageToken'] = store_get(changes_token_prop)
 
     changed = False
-    file_dict = pickle_load(file_dict_fname)
+    file_dict = load_upstream_file_dict()
     file_dict_old = file_dict.copy()
 
     while True:
@@ -689,13 +719,13 @@ def update_upstream_file_name_tree():
 
     if changed:
         get_ghost_files(file_dict)
-        pickle_dump (file_dict, file_dict_fname)
+        store_upstream_file_dict (file_dict)
         build_file_name_tree()
 
 def update_local_file_name_tree():
     status = Status()
 
-    local_file_name_tree = pickle_load (local_file_tree_fname)
+    local_file_name_tree = load_local_tree()
     for upstream_path, local_path in store_get(bindings_prop).items():
         info (f'L {local_path}')
         local_path_lst = path_as_list (local_path)
@@ -706,7 +736,7 @@ def update_local_file_name_tree():
         recursive_update_local_file_tree (local_path_lst, binding_root, local_file_name_tree, status=status)
 
     print (status)
-    pickle_dump (local_file_name_tree, local_file_tree_fname)
+    store_local_tree (local_file_name_tree)
 
 def recursive_tree_compare(local, upstream, path_lst=[]):
     missing_upstream = []
@@ -789,15 +819,16 @@ def binding_remove():
 
     bindings = store_get(bindings_prop, default={})
     local_path = bindings[upstream_path]
-    local_file_name_tree = pickle_load (local_file_tree_fname)
+    local_file_name_tree = load_local_tree()
 
     path_lst = path_as_list(local_path)
     node = lookup_path (local_file_name_tree, path_lst)
+
+    # Remove node from tree and dump updated tree
     parent = lookup_path (local_file_name_tree, path_lst[:-1])
     children = parent['c']
-
     del children[node['name']]
-    pickle_dump (local_file_name_tree, local_file_tree_fname)
+    store_local_tree (local_file_name_tree)
 
     del bindings[upstream_path]
     store(bindings_prop, bindings)
@@ -847,19 +878,19 @@ def binding_add():
     # restoring their configuration manually. Either we need an explicit
     # "reload_config" command, or everytime a tree cache is loaded we must make
     # sure bound paths exist in the tree.
-    upstream_tree = pickle_load (file_tree_fname)['My Drive']
+    upstream_tree = load_upstream_tree()
 
     # Currently bindings can only be added to upload a directory
     # TODO: Implement binding addition to download directories
     upstream_tree_node = lookup_path (upstream_tree, path_as_list(upstream_path), silent=True)
     if path_exists(local_path) and path_isdir(local_path) and upstream_tree_node == None:
-        local_file_name_tree = pickle_load (local_file_tree_fname)
+        local_file_name_tree = load_local_tree()
 
         path_lst = path_as_list(local_path)
         local_tree_node = lookup_path (local_file_name_tree, path_lst, silent=True)
         if local_tree_node == None:
             ensure_tree_dirpath (path_lst, local_file_name_tree)
-            pickle_dump (local_file_name_tree, local_file_tree_fname)
+            store_local_tree (local_file_name_tree)
 
             service = google.get_service()
             ensure_upstream_dir_path (service, local_path, upstream_tree, upstream_path)
@@ -956,13 +987,13 @@ def diff():
             local_tree = get_local_file_tree(local_path)
             print()
         else:
-            local_tree = pickle_load(local_file_tree_fname)
+            local_tree = load_local_tree()
         local_path_lst = path_as_list(local_path)
         local_subtree = lookup_path (local_tree, local_path_lst)
 
-        upstream_tree = pickle_load(file_tree_fname)
+        upstream_tree = load_upstream_tree()
         upstream_path_lst = path_as_list(upstream_path)
-        upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
+        upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
 
         missing_upstream, missing_locally, different, checksum_count, children_count = \
             recursive_tree_compare(local_subtree, upstream_subtree)
@@ -979,8 +1010,8 @@ def diff():
         print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree)
 
     elif len(sys.argv) == 2:
-        local_tree = pickle_load(local_file_tree_fname)
-        upstream_tree = pickle_load(file_tree_fname)
+        local_tree = load_local_tree()
+        upstream_tree = load_upstream_tree()
 
         to_upload = {}
         to_update = {}
@@ -992,7 +1023,7 @@ def diff():
             local_subtree = lookup_path (local_tree, local_path_lst)
 
             upstream_path_lst = path_as_list(upstream_path)
-            upstream_subtree = lookup_path (upstream_tree['My Drive'], upstream_path_lst)
+            upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
 
             missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
                 recursive_tree_compare(local_subtree, upstream_subtree)
@@ -1018,9 +1049,6 @@ def diff():
             missing_locally = []
             contained_bound = set()
             for fpath in tmp_missing_locally:
-                # TODO: When we support binding files upstream, we shouldn't force
-                # the upstream path to be terminated by '/'.
-
                 # FIXME: Let's say we have binding A that has a bound subtree
                 # B, if B's immediate parent is missing from A's subtree, it
                 # will be marked for removal because the path to the parent
@@ -1032,6 +1060,9 @@ def diff():
                 # immediate file), only A should be present as missing, not all
                 # 3 directories. How we handle this will affect the fix for the
                 # problem above.
+
+                # TODO: When we support binding files upstream, we shouldn't force
+                # the upstream path to be terminated by '/'.
                 upstream_fpath = path_cat(upstream_path, fpath, '')
                 if upstream_fpath not in bindings.keys():
                     to_remove.add(f'{path_cat(upstream_path, fpath)}')
@@ -1183,9 +1214,7 @@ def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=
         service = google.get_service()
 
     if upstream_root == None:
-        upstream_tree = pickle_load(file_tree_fname)
-        upstream_root = upstream_tree['My Drive']
-
+        upstream_root = load_upstream_tree()
 
     if os.path.isfile(local_abs_path):
         upload_file (service, local_abs_path, upstream_root, upstream_abs_path)
@@ -1217,8 +1246,7 @@ def upload():
     to_upload = py_literal_load (to_upload_fname)
 
     if len(to_upload) > 0:
-        upstream_tree = pickle_load(file_tree_fname)
-        upstream_root = upstream_tree['My Drive']
+        upstream_root = load_upstream_tree()
 
         stat = Status()
         service = google.get_service()
@@ -1246,8 +1274,7 @@ def push():
     to_remove = py_literal_load (to_remove_fname)
 
     if len(to_upload) > 0 or len(to_update) > 0:
-        upstream_tree = pickle_load(file_tree_fname)
-        upstream_root = upstream_tree['My Drive']
+        upstream_root = load_upstream_tree()
 
         service = google.get_service()
 
