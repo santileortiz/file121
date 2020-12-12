@@ -229,11 +229,42 @@ def recursive_tree_print(node, indent=''):
         for child in node['c']:
             recursive_tree_print(child, indent=indent + ' ')
 
-def recursive_path_tree_print(node, path=''):
-    print (path_cat(path, node['name']))
-    if 'c' in node.keys():
+def recursive_path_tree_print(node, path='', depth=None):
+    if not is_root_node(node):
+        print (path_cat(path, node['name']))
+        next_path = path_cat(path, node['name'])
+    else:
+        next_path = '/'
+
+    if 'c' in node.keys() and (depth==None or depth > 0):
+        if depth != None:
+            depth = depth-1
+
         for name, child in node['c'].items():
-            recursive_path_tree_print(child, path=path_cat(path, node['name']))
+            recursive_path_tree_print(child, path=next_path, depth=depth)
+
+def print_tree_cmd(tree):
+    depth = get_cli_arg_opt ('--depth')
+    if depth != None:
+        depth = int(depth)
+
+    path = None
+    rest_cli = get_cli_no_opt()
+    if rest_cli != None:
+        path = rest_cli[0]
+
+    upstream_tree = tree
+    node = upstream_tree
+    if path != None:
+        node = lookup_path_subtree (upstream_tree, path_as_list(path))
+
+    recursive_path_tree_print (node, depth=depth)
+
+def print_upstream_tree():
+    print_tree_cmd (load_upstream_tree())
+
+def print_local_tree():
+    print_tree_cmd (load_local_tree())
 
 def tree_set_child(parent, child):
     if 'c' not in parent.keys():
@@ -723,6 +754,8 @@ def update_upstream_file_name_tree():
         build_file_name_tree()
 
 def update_local_file_name_tree():
+    # FIXME: local directory creation isn't reported!!!!!!!!!!!!!!!!
+
     status = Status()
 
     local_file_name_tree = load_local_tree()
@@ -950,7 +983,7 @@ def compare_local_dumps():
         print (f'Tree 2 size: {file_count}/{children_count}')
 
 def print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree, bound_roots=None):
-    # TODO: Use a --verbose flag to force full output evenif subtrees are equal.
+    # TODO: Use a --verbose flag to force full output even if subtrees are equal.
 
     upstream_children_count, upstream_file_count, *_ = recursive_tree_size(upstream_subtree)
     local_children_count, local_file_count, *_ = recursive_tree_size(local_subtree)
@@ -1047,33 +1080,48 @@ def diff():
             # comparison, here we remove those from the actual list of files missing
             # upstream.
             missing_locally = []
-            contained_bound = set()
+            skip_subtrees = set()
+            bound_subtrees = set()
             for fpath in tmp_missing_locally:
-                # FIXME: Let's say we have binding A that has a bound subtree
-                # B, if B's immediate parent is missing from A's subtree, it
-                # will be marked for removal because the path to the parent
-                # isn't exactly a key of the bindings map.
-                #
-                # Also, if we have a full path missing, like /A/B/C, the tree
-                # comparison should report the minimal set of nodes that
-                # represent it. If all A, B and C are empty (besides it's
-                # immediate file), only A should be present as missing, not all
-                # 3 directories. How we handle this will affect the fix for the
-                # problem above.
-
                 # TODO: When we support binding files upstream, we shouldn't force
                 # the upstream path to be terminated by '/'.
                 upstream_fpath = path_cat(upstream_path, fpath, '')
-                if upstream_fpath not in bindings.keys():
+
+                # Consider the case where we have the following bindings:
+                #
+                #   L:/home/user/Drive/   -> U:/
+                #   L:/home/user/datadir1 -> U:/MyData/datadir1
+                #   L:/home/user/datadir2 -> U:/MyData/datadir2
+                #
+                # Now let's assume L:/home/user/Drive/ is empty. When comparing
+                # the first binding's subtrees, L:/home/user/Drive/MyDrive will
+                # be reported as missing. Although U:/MyData isn't bound
+                # directly, we have 2 bindings that have U:/MyData as ancestor.
+                #
+                # The following code detects those bindings and adds
+                # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
+                # subtrees set (only for reporting purposes). At the same time,
+                # it adds U:/MyData to a different set, so print_diff_output()
+                # discounts the size of this subtree when verifying the number
+                # of comparisons made.
+                upstream_bindings = []
+                for binding_upstream in bindings.keys():
+                    if binding_upstream.startswith(upstream_fpath):
+                        upstream_bindings.append(binding_upstream)
+
+                if len(upstream_bindings) == 0:
                     to_remove.add(f'{path_cat(upstream_path, fpath)}')
                     print (f'Missing locally: {fpath}')
                     missing_locally.append (fpath)
                 else:
-                    print (f'Bound Subtree: {fpath}')
-                    contained_bound.add (canonical_path(path_cat(upstream_path,fpath)))
+                    bound_subtrees.update (upstream_bindings)
+                    skip_subtrees.add (canonical_path(upstream_fpath))
+
+            for bound_subtree in sorted(bound_subtrees):
+                print (f'Bound Subtree: {bound_subtree}')
 
             print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree,
-                    bound_roots=contained_bound)
+                    bound_roots=skip_subtrees)
 
 
         if len(to_upload) + len(to_remove) + len(to_update) > 0:
