@@ -313,9 +313,6 @@ def build_file_name_tree():
         if 'mimeType' in f.keys() and f['mimeType'] == "application/vnd.google-apps.folder" and 'c' not in f.keys():
             f['c'] = {}
 
-        if 'mimeType' not in f.keys():
-            print (f'ERROR!!!!: {f_id}, {f}')
-
         if 'parents' in f.keys():
             for parent_id in f['parents']:
                 if parent_id in file_dict.keys():
@@ -382,7 +379,13 @@ def recursive_name_duplicates_print_collect_removal(path, node, to_remove, seque
                 oldest_id = id
 
             if is_file_node(sequential_file_dump[id]) and is_file_node(sequential_file_dump[oldest_id]):
-                if sequential_file_dump[id]['md5Checksum'] != sequential_file_dump[oldest_id]['md5Checksum']:
+                if 'md5Checksum' not in sequential_file_dump[id] or 'md5Checksum' not in sequential_file_dump[oldest_id]:
+                    # NOTE: I've seen duplicates of files that don't have a
+                    # checksum. As far as I've seen, it only happens with
+                    # Google Apps documents (Google Docs, Sheets etc.).
+                    all_equal = False
+
+                elif sequential_file_dump[id]['md5Checksum'] != sequential_file_dump[oldest_id]['md5Checksum']:
                     all_equal = False
 
             elif is_dir_node(sequential_file_dump[id]) and is_dir_node(sequential_file_dump[oldest_id]):
@@ -426,15 +429,7 @@ def show_name_duplicates():
     path_lst = path_as_list(path)
 
     node = lookup_path (load_upstream_tree(), path_lst)
-
-    if get_cli_bool_opt('--remove'):
-        file_dict = load_upstream_file_dict()
-        to_remove = {}
-        recursive_name_duplicates_print_collect_removal(path, node, to_remove, file_dict)
-        print (to_remove)
-
-    else:
-        recursive_name_duplicates_print(path, node)
+    recursive_name_duplicates_print(path, node)
 
 def remove_name_duplicates():
     """
@@ -443,9 +438,12 @@ def remove_name_duplicates():
 
     Pass --dry-run to get a list of what would be deleted without actually doing so.
     """
+    is_dry_run = get_cli_bool_opt('--dry-run')
+
     path = '/'
-    if len(sys.argv) >= 2:
-        path = sys.argv[2]
+    rest_cli = get_cli_no_opt()
+    if rest_cli != None:
+        path = rest_cli[0]
     path_lst = path_as_list(path)
 
     file_name_tree = load_upstream_tree()
@@ -457,23 +455,23 @@ def remove_name_duplicates():
 
     is_first = True
     service = google.get_service()
-    for kept, removed_ids in to_remove.items():
+    for (path, kept_id, all_equal), removed_ids in to_remove.items():
         if not is_first:
             print()
         else:
             is_first = False
 
         equality = ecma_yellow('DIFFERENT')
-        if kept[2]:
+        if all_equal:
             equality = ecma_green('EQUAL')
 
         print (f"{equality}")
-        info (f"U '{kept[0]}'")
-        print (f"Keeping '{kept[1]}'")
+        info (f"R '{path}'")
+        print (f"Keeping '{kept_id}'")
         for file_id in removed_ids:
-            if not get_cli_bool_opt('--dry-run'):
+            if not is_dry_run:
                 remove_file_id (service, file_id)
-            print (f"R {file_id}")
+            print (f"D {file_id}")
 
     # TODO: Update upstream tree
 
@@ -515,11 +513,14 @@ def set_file_entry(node_children, abs_path, fname=None, f_stat=None, status=None
 def ensure_tree_dirpath (path_lst, node):
     assert is_dir_node(node), "Passing non directory root to ensure_tree_dirpath()"
 
-    for dirname in path_lst:
+    created = []
+    for i, dirname in enumerate(path_lst):
         if dirname not in node['c'].keys():
             node['c'][dirname] = {'name':dirname, 'c':{}}
+            created.append(os.sep + "/".join(path_lst[:i+1]))
         node = node['c'][dirname]
-    return node
+
+    return node, created
 
 def get_local_file_tree(path, local_file_name_tree = {}, status=None):
     # TODO: I thought I could change local_file_name_tree for a node which we
@@ -552,7 +553,10 @@ def get_local_file_tree(path, local_file_name_tree = {}, status=None):
                 log_warning (status, f'Ignoring link to directory {path_cat(fpath)}')
 
         path_lst = path_as_list(dirpath)
-        node = ensure_tree_dirpath (path_lst, local_file_name_tree)
+        # This should print whenever a directory is created
+        node, created_dirs = ensure_tree_dirpath (path_lst, local_file_name_tree)
+        for created_dir in sorted(created_dirs):
+            print (f'A {path_cat(created_dir,"")}')
 
         for fname in filenames:
             abs_path = path_cat(dirpath, fname)
@@ -581,13 +585,13 @@ def build_local_file_name_tree():
     else:
         local_file_name_tree = {}
         for upstream_path, local_path in store_get(bindings_prop).items():
-            info (f'L {local_path}')
+            info (f"L '{local_path}'")
             get_local_file_tree (local_path, local_file_name_tree=local_file_name_tree, status=status)
 
         store_local_tree (local_file_name_tree)
 
     print()
-    print (status)
+    status.print()
 
 def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, status=None):
     abs_path = os.sep + os.sep.join(path_lst)
@@ -617,11 +621,11 @@ def recursive_update_local_file_tree(path_lst, node, local_file_name_tree, statu
 
         for removed in removed_dirs:
             del old_nodes[removed]
-            print (f'R {path_cat(abs_path, removed)}')
+            print (f'D {path_cat(abs_path, removed)}')
 
         for removed in removed_files:
             del old_nodes[removed]
-            print (f'R {path_cat(abs_path, removed)}')
+            print (f'D {path_cat(abs_path, removed)}')
 
         for dirname in equal_dirs:
             recursive_update_local_file_tree(path_lst + [dirname], old_nodes[dirname], local_file_name_tree)
@@ -671,7 +675,7 @@ def update_upstream_file_name_tree():
     #  Information of permanently removed files can't be accessed anymore, so
     #  the 'file' attribute of the change object won't be present. The id of
     #  the removed file will come in the 'fileId' attribute of the change
-    #  object. This will happen for example when the thrash bin is emptied.
+    #  object. This will happen for example when the trash bin is emptied.
     #
     #  This is why we don't filter out thrashed files here, like we do in
     #  sequential_file_dump().
@@ -711,9 +715,19 @@ def update_upstream_file_name_tree():
 
                         if f_id in file_dict.keys():
                             del file_dict[f_id]
-                            print(f'R {path}')
+                            print(f'D {path}')
                         else:
-                            print(f'R? {path}')
+                            # Got a change that represents a deletion but we
+                            # didn't have a record of that file before. This
+                            # can happen if a user creates a file then deletes
+                            # it, but we didn't do an update between
+                            # creation/deletion.
+                            #
+                            # TODO: For now I print this because it can show
+                            # errors in the change processing logic, but really
+                            # users shouldn't care about this if we are sure it
+                            # only happens in the case described above.
+                            print(f'D? {path}')
 
                     elif 'file' in change.keys():
                         f = change['file']
@@ -730,9 +744,9 @@ def update_upstream_file_name_tree():
 
                             else:
                                 if 'md5Checksum' not in f.keys():
-                                    print(f'N {path}')
+                                    print(f'A {path}')
                                 else:
-                                    print(f'N {f["md5Checksum"]} - {path}')
+                                    print(f'A {f["md5Checksum"]} - {path}')
 
                         else:
                             # This will happen when a file shared with the user
@@ -754,13 +768,11 @@ def update_upstream_file_name_tree():
         build_file_name_tree()
 
 def update_local_file_name_tree():
-    # FIXME: local directory creation isn't reported!!!!!!!!!!!!!!!!
-
     status = Status()
 
     local_file_name_tree = load_local_tree()
     for upstream_path, local_path in store_get(bindings_prop).items():
-        info (f'L {local_path}')
+        info (f"L '{local_path}'")
         local_path_lst = path_as_list (local_path)
 
         binding_root = lookup_path(local_file_name_tree, local_path_lst, silent=True)
@@ -768,7 +780,7 @@ def update_local_file_name_tree():
         # :file_bindings would need a separate case.
         recursive_update_local_file_tree (local_path_lst, binding_root, local_file_name_tree, status=status)
 
-    print (status)
+    status.print()
     store_local_tree (local_file_name_tree)
 
 def recursive_tree_compare(local, upstream, path_lst=[]):
@@ -1164,7 +1176,7 @@ def remove_file(service, upstream_root, upstream_abs_path, status=None):
 
     if path_node != None:
         remove_file_id (service, path_node['id'])
-        print (f"R {upstream_abs_path}")
+        print (f"D {upstream_abs_path}")
     else:
         log_error (status, f"File deletion failed: {upstream_abs_path}")
 
@@ -1188,7 +1200,7 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, statu
                 resumable=True,
                 chunksize=1048576)
 
-        print (f"N {local_abs_path} -> {upstream_abs_path}")
+        print (f"A {local_abs_path} -> {upstream_abs_path}")
 
         request = service.files().create(body=file_metadata, media_body=data)
         google.request_execute_cli(request)
@@ -1211,7 +1223,7 @@ def update_file(service, local_abs_path, upstream_root, upstream_abs_path, statu
                 resumable=True,
                 chunksize=1048576)
 
-        print (f"C {local_abs_path} -> {upstream_abs_path}")
+        print (f"U {local_abs_path} -> {upstream_abs_path}")
 
         request = service.files().update(fileId=path_node['id'], media_body=data)
         google.request_execute_cli(request)
@@ -1251,7 +1263,7 @@ def ensure_upstream_dir_path(service, local_abs_path, upstream_root, upstream_ab
                                                    fields='id').execute()
             node = tree_new_child (node, create_folder.get('id', []), dir_name)
             parent_lst[0] = node['id']
-        print (f"N {path_cat(upstream_abs_path, '')}")
+        print (f"A {path_cat(upstream_abs_path, '')}")
 
 def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=None, status=None):
     """
@@ -1296,14 +1308,14 @@ def upload():
     if len(to_upload) > 0:
         upstream_root = load_upstream_tree()
 
-        stat = Status()
+        status = Status()
         service = google.get_service()
         for local_abs_path, upstream_abs_path in to_upload.items():
-            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=stat)
+            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=status)
 
         # Because the output can be very long, summarize all messages at
         # the end
-        print (stat)
+        status.print()
 
     else:
         print ('List of files to upload is empty.')
@@ -1316,7 +1328,7 @@ def push():
     update_local_file_name_tree()
     diff()
 
-    stat = Status()
+    status = Status()
     to_upload = py_literal_load (to_upload_fname)
     to_update = py_literal_load (to_update_fname)
     to_remove = py_literal_load (to_remove_fname)
@@ -1328,21 +1340,21 @@ def push():
 
     if len(to_upload) > 0:
         for local_abs_path, upstream_abs_path in to_upload.items():
-            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=stat)
+            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=status)
 
     if len(to_update) > 0:
         for local_abs_path, upstream_abs_path in to_update.items():
-            update_file (service, local_abs_path, upstream_root, upstream_abs_path, status=stat)
+            update_file (service, local_abs_path, upstream_root, upstream_abs_path, status=status)
 
     if len(to_remove) > 0:
         for upstream_abs_path in to_remove:
-            remove_file (service, upstream_root, upstream_abs_path, status=stat)
+            remove_file (service, upstream_root, upstream_abs_path, status=status)
 
     update_upstream_file_name_tree()
 
     # Because the output can be very long, summarize all messages at
     # the end
-    print (stat)
+    status.print()
     
 
 if __name__ == "__main__":

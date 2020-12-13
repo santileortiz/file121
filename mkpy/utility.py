@@ -548,14 +548,28 @@ def store_get (name, default=None):
     if name == 'last_target':
         warn('Las called snip cache variable was renamed. Please change \'last_target\' to \'last_snip\'')
 
+    cache_dict = get_cache_dict ()
+
+    if name not in cache_dict.keys ():
+        if default != None:
+            cache_dict[name] = default
+        else:
+            # TODO: store_get(<name>) won't silently return None, it will print
+            # this warning. If users want to set None as default return value,
+            # store_get(<name>, default=None) has to be used. I like it because
+            # it shows intent explicitly, but I'm not sure if it's intuitive
+            # enough.
+            print ('Key \''+name+'\' is not in pymk/cache.')
+
     # Even though we could avoid creating this function and require the user to
     # call store() with value==None, I found this is counter intuitive and hard
     # to remember, because it mixes a function that stores with one that gets
     # so the argument order is not straightforward, when using it to store the
     # 'natural' order is (name, value, default), but when using it to get a
     # value the common order would be (name, default, value) as value isn't
-    # really useful here and needs to be set to None.
-    return store (name, None, default)
+    # really useful here and needs to be set to None. Also, it rewrites the
+    # cache file on reads, which is unexpected.
+    return cache_dict.get (name)
 
 def store_init (name, value):
     """
@@ -610,13 +624,13 @@ def store_init (name, value):
 def pers_func_f (name, func, args, kwargs={}):
     """
     This function calls _func_(*args, **kwargs), stores whatever it returns in
-    mkpy/cache with _name_ as key. If this function is called agaín, and _args_
+    mkpy/cache with _name_ as key. If this function is called again, and _args_
     and _kwargs_ don't change, the previous result is returned without calling
     _func_ agaín.
 
-    We assume the return value of _func_ only depends on its arguments. If it
-    depends on external state, there is no way we can detect _func_ needs to be
-    called again.
+    We assume the return value of _func_ only depends on its arguments (it's
+    purely functional). If it depends on external state, there is no way we can
+    detect _func_ needs to be called again.
     """
     # I don't think there is a valud usecase where we would receive no
     # arguments. If there are no arguments then the return value of the
@@ -673,8 +687,8 @@ def pers_func (name, func, arg):
     #
     #     pers_func(name, func, [arg]) vs pers_func(name, func, arg)
     #
-    # What I'm worried is that people would find it counter intuitive to have
-    # to wrap arg into a list.
+    # What I'm worried is that users will find it counter intuitive to have to
+    # wrap arg into a list.
     return pers_func_f (name, func, [arg])
 
 def path_isdir (path_s):
@@ -1115,14 +1129,17 @@ def pymk_default (skip_snip_cache=[]):
 
     else:
         call_user_function (t)
-        if t != 'default' and t != 'install' and t not in skip_snip_cache:
+        old_t = store_get ('last_snip', default=None)
+        if t != 'default' and t != 'install' and t != old_t and t not in skip_snip_cache:
             store ('last_snip', value=t)
 
 ##########################
 # Custom status logger API
 #
-# This is a simpler logging API than the default logger that allows to easily
-# get the result of a single call.
+# This is a simpler logging API than the default logger. It allows to easily
+# process its content after it's been populated. Processing is done with normal
+# code that reads the event array, without requiring knowledge of concepts like
+# filters, handlers, formatters etc.
 _level_enum = {
     'ERROR': 1,
     'WARNING': 2,
@@ -1150,6 +1167,12 @@ class Status():
     def __str__(self):
         events_str_arr = [f'{_level_to_name[e.level]}: {e.message}' for e in self.events if e.level <= self.level]
         return '\n'.join(events_str_arr)
+
+    def print(self):
+        """
+        Utility method that avoids printing an empty line if the event array is empty.
+        """
+        print(self, end='')
 
 def log_clsr(level_value):
     def log_generic(status, message, echo=False):
