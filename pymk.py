@@ -66,6 +66,238 @@ def store_local_tree(root):
     return pickle_dump (root, local_file_tree_fname)
 
 
+###############################
+# File synchronization backend
+#
+# TODO: Move this into another file. We don't want these functions to be called
+# as pymk snips.
+
+def recursive_tree_compare(local, upstream, path_lst=[]):
+    missing_upstream = []
+    missing_locally = []
+    different = []
+    checksum_count = 0
+    children_count = 0
+
+    # NOTE: Files can be different in 2 ways. Their content may be different
+    # (checksum mismatch) or maybe their types are different (type mismatch)
+    # and we are trying to compare a file with a directory.
+    if 'md5Checksum' in local.keys() and 'md5Checksum' in upstream.keys():
+        if local['md5Checksum'] != upstream['md5Checksum']:
+            different.append (os.sep.join(path_lst))
+        else:
+            checksum_count += 1
+    elif ('md5Checksum' in local.keys()) != ('md5Checksum' in upstream.keys()):
+        different.append (os.sep.join(path_lst))
+
+    if 'c' in local.keys() and 'c' in upstream.keys():
+        both = local['c'].keys() & upstream['c'].keys()
+        children_count += len(both)
+        for fname in both:
+            local_f = local['c'][fname]
+            upstream_f = upstream['c'][fname]
+
+            l_missing_upstream, l_missing_locally, l_different, l_checksum_count, l_children_count = \
+                recursive_tree_compare(local_f, upstream_f, path_lst=path_lst + [fname])
+            missing_upstream += l_missing_upstream
+            missing_locally += l_missing_locally
+            different += l_different
+            checksum_count += l_checksum_count
+            children_count += l_children_count
+
+        for fname in upstream['c'].keys() - local['c'].keys():
+            missing_locally.append(path_cat(os.sep.join(path_lst), fname))
+
+        for fname in local['c'].keys() - upstream['c'].keys():
+            missing_upstream.append(path_cat(os.sep.join(path_lst), fname))
+
+    elif 'c' not in local.keys() and 'c' in upstream.keys():
+        for fname in upstream['c'].keys():
+            missing_locally.append(path_cat(os.sep.join(path_lst), fname))
+
+    elif 'c' in local.keys() and 'c' not in upstream.keys():
+        for fname in local['c'].keys():
+            missing_upstream.append(path_cat(os.sep.join(path_lst), fname))
+
+    return missing_upstream, missing_locally, different, checksum_count, children_count
+
+def compute_push (local_tree, upstream_tree):
+    """
+    Computes the actions necessary to make bound trees upstream be updated to
+    the state of their local counterparts (we call this a push). For instance,
+    any locally removed files will be permanently removed upstream. Same will
+    happen for new files or file changes.
+
+    Returns a tuple of 3 data structures:
+
+        to_upload: Map from local paths to the upstream path where they should
+          be created new.
+
+        to_update: Map from local paths to their existing upstream version that
+          needs to be updated.
+
+        to_remove: Set of upstream paths to be removed.
+    """
+
+    to_upload = {}
+    to_update = {}
+    to_remove = set()
+    is_first = True
+    bindings = store_get(bindings_prop)
+    for upstream_path, local_path in bindings.items():
+        local_path_lst = path_as_list(local_path)
+        local_subtree = lookup_path (local_tree, local_path_lst)
+
+        upstream_path_lst = path_as_list(upstream_path)
+        upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
+
+        missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
+            recursive_tree_compare(local_subtree, upstream_subtree)
+
+        for fpath in different:
+            to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
+
+        for fpath in missing_upstream:
+            to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
+
+        # Bound directories will be counted as missing locally on the root
+        # comparison, here we remove those from the actual list of files missing
+        # upstream.
+        missing_locally = []
+        for fpath in tmp_missing_locally:
+            # TODO: When we support binding files upstream, we shouldn't force
+            # the upstream path to be terminated by '/'.
+            upstream_fpath = path_cat(upstream_path, fpath, '')
+
+            # Consider the case where we have the following bindings:
+            #
+            #   L:/home/user/Drive/   -> U:/
+            #   L:/home/user/datadir1 -> U:/MyData/datadir1
+            #   L:/home/user/datadir2 -> U:/MyData/datadir2
+            #
+            # Now let's assume L:/home/user/Drive/ is empty. When comparing
+            # the first binding's subtrees, L:/home/user/Drive/MyDrive will
+            # be reported as missing. Although U:/MyData isn't bound
+            # directly, we have 2 bindings that have U:/MyData as ancestor.
+            #
+            # The following code detects those bindings and adds
+            # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
+            # subtrees set (only for reporting purposes). At the same time,
+            # it adds U:/MyData to a different set, so print_diff_output()
+            # discounts the size of this subtree when verifying the number
+            # of comparisons made.
+            upstream_bindings = []
+            for binding_upstream in bindings.keys():
+                if binding_upstream.startswith(upstream_fpath):
+                    upstream_bindings.append(binding_upstream)
+
+            if len(upstream_bindings) == 0:
+                to_remove.add(f'{path_cat(upstream_path, fpath)}')
+                missing_locally.append (fpath)
+
+    return to_upload, to_update, to_remove
+
+def compute_diff(local_tree, upstream_tree):
+    """
+    Computes what has changed between the local and upstream trees, taking into
+    account the bindings.
+    """
+    to_upload = {}
+    to_update = {}
+    to_remove = set()
+    is_first = True
+    bindings = store_get(bindings_prop)
+    for upstream_path, local_path in bindings.items():
+        local_path_lst = path_as_list(local_path)
+        local_subtree = lookup_path (local_tree, local_path_lst)
+
+        upstream_path_lst = path_as_list(upstream_path)
+        upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
+
+        missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
+            recursive_tree_compare(local_subtree, upstream_subtree)
+
+        if not is_first:
+            print()
+        is_first = False
+
+        info (f"U '{upstream_path}'")
+        info (f"L '{local_path}'")
+
+        for fpath in different:
+            to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
+            print (f'Different: {fpath}')
+
+        for fpath in missing_upstream:
+            to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
+            print (f'Missing upstream: {fpath}')
+
+        # Bound directories will be counted as missing locally on the root
+        # comparison, here we remove those from the actual list of files missing
+        # upstream.
+        missing_locally = []
+        skip_subtrees = set()
+        bound_subtrees = set()
+        for fpath in tmp_missing_locally:
+            # TODO: When we support binding files upstream, we shouldn't force
+            # the upstream path to be terminated by '/'.
+            upstream_fpath = path_cat(upstream_path, fpath, '')
+
+            # Consider the case where we have the following bindings:
+            #
+            #   L:/home/user/Drive/   -> U:/
+            #   L:/home/user/datadir1 -> U:/MyData/datadir1
+            #   L:/home/user/datadir2 -> U:/MyData/datadir2
+            #
+            # Now let's assume L:/home/user/Drive/ is empty. When comparing
+            # the first binding's subtrees, L:/home/user/Drive/MyDrive will
+            # be reported as missing. Although U:/MyData isn't bound
+            # directly, we have 2 bindings that have U:/MyData as ancestor.
+            #
+            # The following code detects those bindings and adds
+            # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
+            # subtrees set (only for reporting purposes). At the same time,
+            # it adds U:/MyData to a different set, so print_diff_output()
+            # discounts the size of this subtree when verifying the number
+            # of comparisons made.
+            upstream_bindings = []
+            for binding_upstream in bindings.keys():
+                if binding_upstream.startswith(upstream_fpath):
+                    upstream_bindings.append(binding_upstream)
+
+            if len(upstream_bindings) == 0:
+                to_remove.add(f'{path_cat(upstream_path, fpath)}')
+                print (f'Missing locally: {fpath}')
+                missing_locally.append (fpath)
+            else:
+                bound_subtrees.update (upstream_bindings)
+                skip_subtrees.add (canonical_path(upstream_fpath))
+
+        for bound_subtree in sorted(bound_subtrees):
+            print (f'Bound Subtree: {bound_subtree}')
+
+        print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree,
+                bound_roots=skip_subtrees)
+
+
+    if len(to_upload) + len(to_remove) + len(to_update) > 0:
+        print()
+
+    py_literal_dump (to_upload, to_upload_fname)
+    if len(to_upload) > 0:
+        print (f'Added files to be uploaded to: {to_upload_fname}')
+
+    py_literal_dump (list(to_remove), to_remove_fname)
+    if len(to_remove) > 0:
+        print (f'Added files to be removed to: {to_remove_fname}')
+
+    py_literal_dump (to_update, to_update_fname)
+    if len(to_update) > 0:
+        print (f'Added files to be updated to: {to_update_fname}')
+
+
+
+
 def default ():
     target = store_get ('last_snip', default='example_procedure')
     call_user_function(target)
@@ -783,55 +1015,6 @@ def update_local_file_name_tree():
     status.print()
     store_local_tree (local_file_name_tree)
 
-def recursive_tree_compare(local, upstream, path_lst=[]):
-    missing_upstream = []
-    missing_locally = []
-    different = []
-    checksum_count = 0
-    children_count = 0
-
-    # NOTE: Files can be different in 2 ways. Their content may be different
-    # (checksum mismatch) or maybe their types are different (type mismatch)
-    # and we are trying to compare a file with a directory.
-    if 'md5Checksum' in local.keys() and 'md5Checksum' in upstream.keys():
-        if local['md5Checksum'] != upstream['md5Checksum']:
-            different.append (os.sep.join(path_lst))
-        else:
-            checksum_count += 1
-    elif ('md5Checksum' in local.keys()) != ('md5Checksum' in upstream.keys()):
-        different.append (os.sep.join(path_lst))
-
-    if 'c' in local.keys() and 'c' in upstream.keys():
-        both = local['c'].keys() & upstream['c'].keys()
-        children_count += len(both)
-        for fname in both:
-            local_f = local['c'][fname]
-            upstream_f = upstream['c'][fname]
-
-            l_missing_upstream, l_missing_locally, l_different, l_checksum_count, l_children_count = \
-                recursive_tree_compare(local_f, upstream_f, path_lst=path_lst + [fname])
-            missing_upstream += l_missing_upstream
-            missing_locally += l_missing_locally
-            different += l_different
-            checksum_count += l_checksum_count
-            children_count += l_children_count
-
-        for fname in upstream['c'].keys() - local['c'].keys():
-            missing_locally.append(path_cat(os.sep.join(path_lst), fname))
-
-        for fname in local['c'].keys() - upstream['c'].keys():
-            missing_upstream.append(path_cat(os.sep.join(path_lst), fname))
-
-    elif 'c' not in local.keys() and 'c' in upstream.keys():
-        for fname in upstream['c'].keys():
-            missing_locally.append(path_cat(os.sep.join(path_lst), fname))
-
-    elif 'c' in local.keys() and 'c' not in upstream.keys():
-        for fname in local['c'].keys():
-            missing_upstream.append(path_cat(os.sep.join(path_lst), fname))
-
-    return missing_upstream, missing_locally, different, checksum_count, children_count
-
 def canonical_path(path):
     return os.sep + path.strip(os.sep)
 
@@ -1303,57 +1486,61 @@ def upload_path (local_abs_path, upstream_abs_path, service=None, upstream_root=
         log_warning (status, f'Skipping unknown file type (link?): {local_abs_path}', echo=True)
 
 def upload():
-    to_upload = py_literal_load (to_upload_fname)
+    # TODO: This is now useless, a useful version would take a local path and
+    # an upstream path as arguments and perform that upload. I have to think
+    # how this interacts with bindings, at the beginning I'm thinking I will
+    # forbid uploading into bound subtrees, untill we get a "sync"
+    # functionality that will download what was uploaded into the locally bound
+    # subtree. In any case we should warn users that they may now have the
+    # uploaded files in 2 places, inside the local binding and the place whare
+    # they originally uploaded it from.
 
-    if len(to_upload) > 0:
-        upstream_root = load_upstream_tree()
+    #if len(to_upload) > 0:
+    #    upstream_root = load_upstream_tree()
 
-        status = Status()
-        service = google.get_service()
-        for local_abs_path, upstream_abs_path in to_upload.items():
-            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=status)
+    #    status = Status()
+    #    service = google.get_service()
+    #    for local_abs_path, upstream_abs_path in to_upload.items():
+    #        upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=status)
 
-        # Because the output can be very long, summarize all messages at
-        # the end
-        status.print()
+    #    # Because the output can be very long, summarize all messages at
+    #    # the end
+    #    status.print()
 
-    else:
-        print ('List of files to upload is empty.')
+    #else:
+    #    print ('List of files to upload is empty.')
+    print ("Upload isn't used now, use 'push'")
 
 def push():
-    # TODO: Make all of this process less verbose and have a consistent CLI
-    # output.
-
+    # TODO: Make all of this process less verbose.
     update_upstream_file_name_tree()
     update_local_file_name_tree()
-    diff()
 
     status = Status()
-    to_upload = py_literal_load (to_upload_fname)
-    to_update = py_literal_load (to_update_fname)
-    to_remove = py_literal_load (to_remove_fname)
+    # TODO: Don't re load trees here, we loaded them before to be able to
+    # update them, the update functions should return the updated tree.
+    upstream_tree = load_upstream_tree()
+    local_tree = load_local_tree ()
+    to_upload, to_update, to_remove = compute_push (local_tree, upstream_tree)
 
-    if len(to_upload) > 0 or len(to_update) > 0:
-        upstream_root = load_upstream_tree()
-
+    if len(to_upload) > 0 or len(to_update) > 0 or len(to_remove) > 0:
         service = google.get_service()
 
-    if len(to_upload) > 0:
-        for local_abs_path, upstream_abs_path in to_upload.items():
-            upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_root, status=status)
+        if len(to_upload) > 0:
+            for local_abs_path, upstream_abs_path in to_upload.items():
+                upload_path (local_abs_path, upstream_abs_path, service=service, upstream_root=upstream_tree, status=status)
 
-    if len(to_update) > 0:
-        for local_abs_path, upstream_abs_path in to_update.items():
-            update_file (service, local_abs_path, upstream_root, upstream_abs_path, status=status)
+        if len(to_update) > 0:
+            for local_abs_path, upstream_abs_path in to_update.items():
+                update_file (service, local_abs_path, upstream_tree, upstream_abs_path, status=status)
 
-    if len(to_remove) > 0:
-        for upstream_abs_path in to_remove:
-            remove_file (service, upstream_root, upstream_abs_path, status=status)
+        if len(to_remove) > 0:
+            for upstream_abs_path in to_remove:
+                remove_file (service, upstream_tree, upstream_abs_path, status=status)
 
-    update_upstream_file_name_tree()
+        update_upstream_file_name_tree()
 
-    # Because the output can be very long, summarize all messages at
-    # the end
+    # Print messages if there are any
     status.print()
     
 
