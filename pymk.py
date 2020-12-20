@@ -27,12 +27,6 @@ upstream_file_dict_fname = path_cat (cache_dir, 'upstream_file_dict')
 upstream_file_tree_fname = path_cat (cache_dir, 'upstream_file_tree')
 local_file_tree_fname    = path_cat (cache_dir, 'local_file_tree')
 
-# TODO: Probably stop using files for this, instead just have a function that
-# returns these structures.
-to_upload_fname = 'to_upload'
-to_remove_fname = 'to_remove'
-to_update_fname = 'to_update'
-
 changes_token_prop = 'changes_token'
 bindings_prop = 'bindings'
 
@@ -121,6 +115,96 @@ def recursive_tree_compare(local, upstream, path_lst=[]):
 
     return missing_upstream, missing_locally, different, checksum_count, children_count
 
+class SubtreeDiff():
+    def __init__(self, local_path, remote_path):
+        self.local_path = local_path
+        self.remote_path = remote_path
+
+        self.bound_subtrees = set()
+        self.local_missing = []
+        self.remote_missing = []
+        self.different = []
+
+        # TODO: Clean this up, I'm not sure this, it should probably move to
+        # the test suite and leave a simpler equality verification during
+        # normal operation. Also, the skip_subtrees set doesn't really work in
+        # all cases, need to implement an algorithm that handles all cases. To
+        # make it easier, first abstract things out so we can have a proper
+        # test suite.
+        self.is_equal = False
+        self.skip_subtrees = set()
+        self.equal_checksums = 0
+        self.equal_node_names = 0
+        self.upstream_file_count = 0
+        self.upstream_children_count = 0
+        self.local_file_count = 0
+        self.local_children_count = 0
+
+def compute_diff(local_tree, remote_tree, bindings):
+    """
+    Computes what has changed between the local and upstream trees, taking into
+    account the passed bindings.
+    """
+    
+    diff_result = []
+
+    to_remove = set()
+    is_first = True
+    for upstream_path, local_path in bindings.items():
+        subtree_diff = SubtreeDiff(local_path, upstream_path)
+
+        local_subtree = lookup_path (local_tree, path_as_list(local_path))
+        upstream_subtree = lookup_path (remote_tree, path_as_list(upstream_path))
+
+        missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
+            recursive_tree_compare(local_subtree, upstream_subtree)
+
+        subtree_diff.different = different
+        subtree_diff.remote_missing = missing_upstream
+        subtree_diff.equal_checksums = checksum_count
+        subtree_diff.equal_node_names = children_count
+
+        # Bound directories will be counted as missing locally on the root
+        # comparison, here we remove those from the actual list of files missing
+        # upstream.
+        for fpath in tmp_missing_locally:
+            # TODO: When we support binding files upstream, we shouldn't force
+            # the upstream path to be terminated by '/'.
+            upstream_fpath = path_cat(upstream_path, fpath, '')
+
+            # Consider the case where we have the following bindings:
+            #
+            #   L:/home/user/Drive/   -> U:/
+            #   L:/home/user/datadir1 -> U:/MyData/datadir1
+            #   L:/home/user/datadir2 -> U:/MyData/datadir2
+            #
+            # Now let's assume L:/home/user/Drive/ is empty. When comparing
+            # the first binding's subtrees, L:/home/user/Drive/MyDrive will
+            # be reported as missing. Although U:/MyData isn't bound
+            # directly, we have 2 bindings that have U:/MyData as ancestor.
+            #
+            # The following code detects those bindings and adds
+            # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
+            # subtrees set (only for reporting purposes). At the same time,
+            # it adds U:/MyData to a different set, so verify_diff ()
+            # discounts the size of this subtree when verifying the number
+            # of comparisons made.
+            upstream_bindings = []
+            for binding_upstream in bindings.keys():
+                if binding_upstream.startswith(upstream_fpath):
+                    upstream_bindings.append(binding_upstream)
+
+            if len(upstream_bindings) == 0:
+                subtree_diff.local_missing.append (fpath)
+            else:
+                subtree_diff.bound_subtrees.update (upstream_bindings)
+                subtree_diff.skip_subtrees.add (canonical_path(upstream_fpath))
+
+        verify_diff (subtree_diff, checksum_count, children_count, upstream_subtree, local_subtree, bound_roots=subtree_diff.skip_subtrees)
+        diff_result.append (subtree_diff)
+
+    return diff_result
+
 def compute_push (local_tree, upstream_tree):
     """
     Computes the actions necessary to make bound trees upstream be updated to
@@ -142,160 +226,24 @@ def compute_push (local_tree, upstream_tree):
     to_upload = {}
     to_update = {}
     to_remove = set()
-    is_first = True
+
     bindings = store_get(bindings_prop)
-    for upstream_path, local_path in bindings.items():
-        local_path_lst = path_as_list(local_path)
-        local_subtree = lookup_path (local_tree, local_path_lst)
+    diff_results = compute_diff (local_tree, upstream_tree, bindings)
 
-        upstream_path_lst = path_as_list(upstream_path)
-        upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
+    for diff_result in diff_results:
+        local_path = diff_result.local_path
+        remote_path = diff_result.remote_path
 
-        missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
-            recursive_tree_compare(local_subtree, upstream_subtree)
+        for fpath in diff_result.different:
+            to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(remote_path, fpath)}'
 
-        for fpath in different:
-            to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
+        for fpath in diff_result.remote_missing:
+            to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(remote_path, fpath)}'
 
-        for fpath in missing_upstream:
-            to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
-
-        # Bound directories will be counted as missing locally on the root
-        # comparison, here we remove those from the actual list of files missing
-        # upstream.
-        missing_locally = []
-        for fpath in tmp_missing_locally:
-            # TODO: When we support binding files upstream, we shouldn't force
-            # the upstream path to be terminated by '/'.
-            upstream_fpath = path_cat(upstream_path, fpath, '')
-
-            # Consider the case where we have the following bindings:
-            #
-            #   L:/home/user/Drive/   -> U:/
-            #   L:/home/user/datadir1 -> U:/MyData/datadir1
-            #   L:/home/user/datadir2 -> U:/MyData/datadir2
-            #
-            # Now let's assume L:/home/user/Drive/ is empty. When comparing
-            # the first binding's subtrees, L:/home/user/Drive/MyDrive will
-            # be reported as missing. Although U:/MyData isn't bound
-            # directly, we have 2 bindings that have U:/MyData as ancestor.
-            #
-            # The following code detects those bindings and adds
-            # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
-            # subtrees set (only for reporting purposes). At the same time,
-            # it adds U:/MyData to a different set, so print_diff_output()
-            # discounts the size of this subtree when verifying the number
-            # of comparisons made.
-            upstream_bindings = []
-            for binding_upstream in bindings.keys():
-                if binding_upstream.startswith(upstream_fpath):
-                    upstream_bindings.append(binding_upstream)
-
-            if len(upstream_bindings) == 0:
-                to_remove.add(f'{path_cat(upstream_path, fpath)}')
-                missing_locally.append (fpath)
+        for fpath in diff_result.local_missing:
+            to_remove.add(f'{path_cat(remote_path, fpath)}')
 
     return to_upload, to_update, to_remove
-
-def compute_diff(local_tree, upstream_tree):
-    """
-    Computes what has changed between the local and upstream trees, taking into
-    account the bindings.
-    """
-    to_upload = {}
-    to_update = {}
-    to_remove = set()
-    is_first = True
-    bindings = store_get(bindings_prop)
-    for upstream_path, local_path in bindings.items():
-        local_path_lst = path_as_list(local_path)
-        local_subtree = lookup_path (local_tree, local_path_lst)
-
-        upstream_path_lst = path_as_list(upstream_path)
-        upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
-
-        missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
-            recursive_tree_compare(local_subtree, upstream_subtree)
-
-        if not is_first:
-            print()
-        is_first = False
-
-        info (f"U '{upstream_path}'")
-        info (f"L '{local_path}'")
-
-        for fpath in different:
-            to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
-            print (f'Different: {fpath}')
-
-        for fpath in missing_upstream:
-            to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
-            print (f'Missing upstream: {fpath}')
-
-        # Bound directories will be counted as missing locally on the root
-        # comparison, here we remove those from the actual list of files missing
-        # upstream.
-        missing_locally = []
-        skip_subtrees = set()
-        bound_subtrees = set()
-        for fpath in tmp_missing_locally:
-            # TODO: When we support binding files upstream, we shouldn't force
-            # the upstream path to be terminated by '/'.
-            upstream_fpath = path_cat(upstream_path, fpath, '')
-
-            # Consider the case where we have the following bindings:
-            #
-            #   L:/home/user/Drive/   -> U:/
-            #   L:/home/user/datadir1 -> U:/MyData/datadir1
-            #   L:/home/user/datadir2 -> U:/MyData/datadir2
-            #
-            # Now let's assume L:/home/user/Drive/ is empty. When comparing
-            # the first binding's subtrees, L:/home/user/Drive/MyDrive will
-            # be reported as missing. Although U:/MyData isn't bound
-            # directly, we have 2 bindings that have U:/MyData as ancestor.
-            #
-            # The following code detects those bindings and adds
-            # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
-            # subtrees set (only for reporting purposes). At the same time,
-            # it adds U:/MyData to a different set, so print_diff_output()
-            # discounts the size of this subtree when verifying the number
-            # of comparisons made.
-            upstream_bindings = []
-            for binding_upstream in bindings.keys():
-                if binding_upstream.startswith(upstream_fpath):
-                    upstream_bindings.append(binding_upstream)
-
-            if len(upstream_bindings) == 0:
-                to_remove.add(f'{path_cat(upstream_path, fpath)}')
-                print (f'Missing locally: {fpath}')
-                missing_locally.append (fpath)
-            else:
-                bound_subtrees.update (upstream_bindings)
-                skip_subtrees.add (canonical_path(upstream_fpath))
-
-        for bound_subtree in sorted(bound_subtrees):
-            print (f'Bound Subtree: {bound_subtree}')
-
-        print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree,
-                bound_roots=skip_subtrees)
-
-
-    if len(to_upload) + len(to_remove) + len(to_update) > 0:
-        print()
-
-    py_literal_dump (to_upload, to_upload_fname)
-    if len(to_upload) > 0:
-        print (f'Added files to be uploaded to: {to_upload_fname}')
-
-    py_literal_dump (list(to_remove), to_remove_fname)
-    if len(to_remove) > 0:
-        print (f'Added files to be removed to: {to_remove_fname}')
-
-    py_literal_dump (to_update, to_update_fname)
-    if len(to_update) > 0:
-        print (f'Added files to be updated to: {to_update_fname}')
-
-
 
 
 def default ():
@@ -1177,8 +1125,17 @@ def compare_local_dumps():
         children_count, file_count, *_ = recursive_tree_size(tree2['c']['home'])
         print (f'Tree 2 size: {file_count}/{children_count}')
 
-def print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree, bound_roots=None):
-    # TODO: Use a --verbose flag to force full output even if subtrees are equal.
+def verify_diff (diff_result, checksum_count, children_count, upstream_subtree, local_subtree, bound_roots=None):
+    """
+    Reduntant check to make sure things are working correctly. We test that we
+    compared the same number of checksums to be equal as the number of files.
+    Also check the numper of node name comparisons is equal.
+    
+    In theory just checking nothing is missing and nothing is different should
+    be enough, but we do this in case some bug is causing us not to traverse
+    the full tree or something like that. When code is better tested we could
+    move this into the test suite and make normal operation faster.
+    """
 
     upstream_children_count, upstream_file_count, *_ = recursive_tree_size(upstream_subtree)
     local_children_count, local_file_count, *_ = recursive_tree_size(local_subtree)
@@ -1195,21 +1152,25 @@ def print_diff_output(checksum_count, children_count, upstream_subtree, local_su
         upstream_children_count -= upstream_bound_children_count + len(bound_roots)
         upstream_file_count -= upstream_bound_file_count
 
-
     if children_count == upstream_children_count and children_count == local_children_count and \
             checksum_count == upstream_file_count and checksum_count == local_file_count:
-        print(ecma_green("EQUAL"))
-    else:
-        print ()
-        print (f'Successful checksum comparisons: {checksum_count}')
-        print (f'Children name comparisons: {children_count}')
-        print (f'Upstream subtree size: {upstream_file_count}/{upstream_children_count}')
-        print (f'Local subtree size: {local_file_count}/{local_children_count}')
+        diff_result.is_equal = True
+
+    diff_result.upstream_file_count = upstream_file_count
+    diff_result.upstream_children_count = upstream_children_count
+    diff_result.local_file_count = local_file_count
+    diff_result.local_children_count = local_children_count
+
 
 def diff():
-    if len(sys.argv) == 4:
-        local_path = os.path.abspath(path_resolve(sys.argv[2]))
-        upstream_path = sys.argv[3]
+    # TODO: Update local and upstream trees
+
+    is_verbose = get_cli_bool_opt ('--verbose')
+
+    rest_cli = get_cli_no_opt ()
+    if rest_cli != None and len(rest_cli) == 2:
+        local_path = os.path.abspath(path_resolve(rest_cli[0]))
+        upstream_path = rest_cli[1]
 
         if get_cli_bool_opt('--build-local'):
             local_tree = get_local_file_tree(local_path)
@@ -1223,119 +1184,74 @@ def diff():
         upstream_path_lst = path_as_list(upstream_path)
         upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
 
+        subtree_diff = SubtreeDiff(local_path, upstream_path)
+
         missing_upstream, missing_locally, different, checksum_count, children_count = \
             recursive_tree_compare(local_subtree, upstream_subtree)
 
-        for fpath in different:
-            print (f'Different: {fpath}')
+        subtree_diff.equal_checksums = checksum_count
+        subtree_diff.equal_node_names = children_count
+        subtree_diff.remote_missing = missing_upstream
+        subtree_diff.local_missing = missing_locally
+        subtree_diff.different = different
 
-        for fpath in missing_upstream:
-            print (f'Missing upstream: {fpath}')
+        verify_diff (subtree_diff, checksum_count, children_count, upstream_subtree, local_subtree)
+        diff_results = [subtree_diff]
 
-        for fpath in missing_locally:
-            print (f'Missing locally: {fpath}')
+        # TODO: Handle the case where the path being compared contains a bound
+        # subtree. Right now it will show them as being different even if they
+        # aren't because we assume the content of bound subtrees is missing.
+        # Should we warn about this? or convert this diff operation into a
+        # binding aware one that uses compute_diff()?
 
-        print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree)
-
-    elif len(sys.argv) == 2:
+    elif rest_cli == None:
         local_tree = load_local_tree()
         upstream_tree = load_upstream_tree()
-
-        to_upload = {}
-        to_update = {}
-        to_remove = set()
-        is_first = True
         bindings = store_get(bindings_prop)
-        for upstream_path, local_path in bindings.items():
-            local_path_lst = path_as_list(local_path)
-            local_subtree = lookup_path (local_tree, local_path_lst)
 
-            upstream_path_lst = path_as_list(upstream_path)
-            upstream_subtree = lookup_path (upstream_tree, upstream_path_lst)
+        diff_results = compute_diff (local_tree, upstream_tree, bindings)
 
-            missing_upstream, tmp_missing_locally, different, checksum_count, children_count = \
-                recursive_tree_compare(local_subtree, upstream_subtree)
+    else:
+        print ('Invalid arguments.')
+        return
+
+    is_first = True
+    for diff_result in diff_results:
+        if not diff_result.is_equal or is_verbose:
+            local_path = diff_result.local_path
+            remote_path = diff_result.remote_path
 
             if not is_first:
                 print()
             is_first = False
 
-            info (f"U '{upstream_path}'")
+            if is_verbose:
+                equality = ecma_yellow('DIFFERENT')
+                if diff_result.is_equal:
+                    equality = ecma_green('EQUAL')
+                print (f"{equality}")
+
             info (f"L '{local_path}'")
+            info (f"R '{remote_path}'")
 
-            for fpath in different:
-                to_update[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
-                print (f'Different: {fpath}')
+            for bound_subtree in sorted(diff_result.bound_subtrees):
+                print (ecma_cyan(f'B {bound_subtree}'))
 
-            for fpath in missing_upstream:
-                to_upload[f'{path_cat(local_path, fpath)}'] = f'{path_cat(upstream_path, fpath)}'
-                print (f'Missing upstream: {fpath}')
+            for fpath in diff_result.different:
+                print (f'!= {fpath}')
 
-            # Bound directories will be counted as missing locally on the root
-            # comparison, here we remove those from the actual list of files missing
-            # upstream.
-            missing_locally = []
-            skip_subtrees = set()
-            bound_subtrees = set()
-            for fpath in tmp_missing_locally:
-                # TODO: When we support binding files upstream, we shouldn't force
-                # the upstream path to be terminated by '/'.
-                upstream_fpath = path_cat(upstream_path, fpath, '')
+            for fpath in diff_result.local_missing:
+                print (f'-L {fpath}')
 
-                # Consider the case where we have the following bindings:
-                #
-                #   L:/home/user/Drive/   -> U:/
-                #   L:/home/user/datadir1 -> U:/MyData/datadir1
-                #   L:/home/user/datadir2 -> U:/MyData/datadir2
-                #
-                # Now let's assume L:/home/user/Drive/ is empty. When comparing
-                # the first binding's subtrees, L:/home/user/Drive/MyDrive will
-                # be reported as missing. Although U:/MyData isn't bound
-                # directly, we have 2 bindings that have U:/MyData as ancestor.
-                #
-                # The following code detects those bindings and adds
-                # U:/MyData/datadir1 and U:/MyData/datadir2 to the bound
-                # subtrees set (only for reporting purposes). At the same time,
-                # it adds U:/MyData to a different set, so print_diff_output()
-                # discounts the size of this subtree when verifying the number
-                # of comparisons made.
-                upstream_bindings = []
-                for binding_upstream in bindings.keys():
-                    if binding_upstream.startswith(upstream_fpath):
-                        upstream_bindings.append(binding_upstream)
+            for fpath in diff_result.remote_missing:
+                print (f'-R {fpath}')
 
-                if len(upstream_bindings) == 0:
-                    to_remove.add(f'{path_cat(upstream_path, fpath)}')
-                    print (f'Missing locally: {fpath}')
-                    missing_locally.append (fpath)
-                else:
-                    bound_subtrees.update (upstream_bindings)
-                    skip_subtrees.add (canonical_path(upstream_fpath))
+            if not diff_result.is_equal:
+                print ()
 
-            for bound_subtree in sorted(bound_subtrees):
-                print (f'Bound Subtree: {bound_subtree}')
-
-            print_diff_output(checksum_count, children_count, upstream_subtree, local_subtree,
-                    bound_roots=skip_subtrees)
-
-
-        if len(to_upload) + len(to_remove) + len(to_update) > 0:
-            print()
-
-        py_literal_dump (to_upload, to_upload_fname)
-        if len(to_upload) > 0:
-            print (f'Added files to be uploaded to: {to_upload_fname}')
-
-        py_literal_dump (list(to_remove), to_remove_fname)
-        if len(to_remove) > 0:
-            print (f'Added files to be removed to: {to_remove_fname}')
-
-        py_literal_dump (to_update, to_update_fname)
-        if len(to_update) > 0:
-            print (f'Added files to be updated to: {to_update_fname}')
-
-    else:
-        print ('Invalid arguments.')
+            print (f'Comparison count:    {diff_result.equal_checksums}/{diff_result.equal_node_names}')
+            print (f'Remote subtree size: {diff_result.upstream_file_count}/{diff_result.upstream_children_count}')
+            print (f'Local subtree size:  {diff_result.local_file_count}/{diff_result.local_children_count}')
 
 def is_file_node(node):
     ret = 'c' not in node.keys()
@@ -1512,12 +1428,12 @@ def upload():
     print ("Upload isn't used now, use 'push'")
 
 def push():
-    # TODO: Make all of this process less verbose.
+    # TODO: Make this process less verbose.
     update_upstream_file_name_tree()
     update_local_file_name_tree()
 
     status = Status()
-    # TODO: Don't re load trees here, we loaded them before to be able to
+    # TODO: Don't reload trees here, we loaded them before to be able to
     # update them, the update functions should return the updated tree.
     upstream_tree = load_upstream_tree()
     local_tree = load_local_tree ()
