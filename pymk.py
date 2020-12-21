@@ -1407,8 +1407,8 @@ def upload():
     # how this interacts with bindings, at the beginning I'm thinking I will
     # forbid uploading into bound subtrees, untill we get a "sync"
     # functionality that will download what was uploaded into the locally bound
-    # subtree. In any case we should warn users that they may now have the
-    # uploaded files in 2 places, inside the local binding and the place whare
+    # subtree. In any case, we should warn users that they may now have the
+    # uploaded files in 2 places, inside the local binding and the place where
     # they originally uploaded it from.
 
     #if len(to_upload) > 0:
@@ -1429,9 +1429,15 @@ def upload():
 
 def push():
     # TODO: Make this process less verbose.
-    update_upstream_file_name_tree()
+    print ('Updating local index...')
     update_local_file_name_tree()
+    print()
 
+    print ('Updating remote index...')
+    update_upstream_file_name_tree()
+    print()
+
+    print ('Performing changes in remote...')
     status = Status()
     # TODO: Don't reload trees here, we loaded them before to be able to
     # update them, the update functions should return the updated tree.
@@ -1454,6 +1460,9 @@ def push():
             for upstream_abs_path in to_remove:
                 remove_file (service, upstream_tree, upstream_abs_path, status=status)
 
+        print()
+
+        print ('Updating remote index...')
         update_upstream_file_name_tree()
 
     # Print messages if there are any
