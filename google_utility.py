@@ -179,3 +179,6 @@ def request_execute_cli(request):
             print (f' [0%]', file=sys.stderr, end='')
 
         print (f'\r', file=sys.stderr, end='')
+
+    # Remove progress indicator, clear line
+    print (f'\r\033[2K', file=sys.stderr, end='')
