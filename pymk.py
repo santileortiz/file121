@@ -6,6 +6,7 @@ import dateutil.parser
 import hashlib
 import traceback
 import stat
+import shutil
 
 import mimetypes
 from googleapiclient.http import MediaFileUpload
@@ -262,7 +263,7 @@ def get_file_path(file_dict, node):
 
         # Advance to first parent. This will only return "a" path, but in Drive
         # a file can have multiple of them.
-        if 'parents' in node.keys():
+        if 'parents' in node.keys() and node['parents'][0] in file_dict.keys():
             node = file_dict[node['parents'][0]]
         else:
             if not is_root_node(node):
@@ -890,6 +891,22 @@ def update_upstream_file_name_tree():
                     if change['removed'] or ('file' in change.keys() and change['file']['trashed']):
                         if f_id in file_dict_old.keys():
                             path = get_file_path(file_dict_old, file_dict_old[f_id])
+
+                            # This can happen when deleting a directory, we
+                            # first get the update of the directory removal and
+                            # we remove the whole subtree in the local index.
+                            # Then Drive takes some time to create update
+                            # events for the content of the directory which we
+                            # get later, but those file nodes were already
+                            # remove from the upstream index.
+                            #
+                            # TODO: A better approach could be to track these
+                            # removed but pending-to-be-notified-by-Drive
+                            # nodes. Then we can be sure all non found IDs are
+                            # only those we expected. Otherwise we should
+                            # report an error.
+                            if path == None:
+                                path = f_id
                         else:
                             path = change
 
@@ -1070,8 +1087,6 @@ def binding_add():
 
             service = google.get_service()
             ensure_upstream_dir_path (service, local_path, upstream_tree, upstream_path)
-            # Should we upload the directory here? Right now we don't, user
-            # needs to call diff, then push.
 
             bindings[upstream_path] = local_path
             store(bindings_prop, bindings)
@@ -1079,11 +1094,43 @@ def binding_add():
             update_local_file_name_tree()
             update_upstream_file_name_tree()
 
+            # Should we upload the directory here? Right now we don't, user
+            # needs to call diff, then push.
+
         else:
             print ("Invalid binding: local directory is already part of local file tree.")
 
     elif not path_exists(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
-        print ("Bindings that download subtrees aren't implemented.")
+        # Find out if the directory is bound locally somewhere, in which case
+        # we don't need to download anything, we just move it to its new local
+        # position, create the binding and update the indices.
+        local_parent_path = None
+        upstream_parent_path = None
+        for binding_upstream, binding_local in bindings.items():
+            if upstream_path.startswith(binding_upstream):
+                local_parent_path = binding_local
+                upstream_parent_path = binding_upstream
+                break
+
+        if local_parent_path != None and upstream_parent_path != None:
+            local_source = path_cat(local_parent_path, upstream_path.replace(binding_upstream, '', 1))
+            shutil.move(local_source, local_path)
+
+            # Add the parent node of the new binding to the local index
+            local_file_name_tree = load_local_tree()
+            path_lst = path_as_list(local_path)
+            local_tree_node = lookup_path (local_file_name_tree, path_lst, silent=True)
+            assert local_tree_node != None, "Local index contains non existent node, it's probably corrupted... this is BAD. Rebuild the local index."
+            ensure_tree_dirpath (path_lst, local_file_name_tree)
+            store_local_tree (local_file_name_tree)
+
+            bindings[upstream_path] = local_path
+            store(bindings_prop, bindings)
+
+            update_local_file_name_tree()
+
+        else:
+            print ("Bindings that download subtrees aren't implemented.")
 
     elif path_exists(local_path) and path_isdir(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
         print ("Bindings that merge subtrees aren't implemented.")
