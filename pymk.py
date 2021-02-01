@@ -847,6 +847,8 @@ def get_file_by_id():
 
 
 def update_upstream_file_name_tree():
+    print ('Updating remote index...')
+
     # TODO: Test these cases:
     #  - What happens when thrashing/removing a subtree?, I would guess we get
     #    a change object for each folder/file in it.
@@ -965,6 +967,7 @@ def update_upstream_file_name_tree():
         build_file_name_tree()
 
 def update_local_file_name_tree():
+    print ('Updating local index...')
     status = Status()
 
     local_file_name_tree = load_local_tree()
@@ -1120,7 +1123,7 @@ def binding_add():
             local_file_name_tree = load_local_tree()
             path_lst = path_as_list(local_path)
             local_tree_node = lookup_path (local_file_name_tree, path_lst, silent=True)
-            assert local_tree_node != None, "Local index contains non existent node, it's probably corrupted... this is BAD. Rebuild the local index."
+            assert local_tree_node == None, "Local index contains non existent node, it's probably corrupted... this is BAD. Rebuild the local index."
             ensure_tree_dirpath (path_lst, local_file_name_tree)
             store_local_tree (local_file_name_tree)
 
@@ -1476,11 +1479,9 @@ def upload():
 
 def push():
     # TODO: Make this process less verbose.
-    print ('Updating local index...')
     update_local_file_name_tree()
     print()
 
-    print ('Updating remote index...')
     update_upstream_file_name_tree()
     print()
 
@@ -1509,7 +1510,6 @@ def push():
 
         print()
 
-        print ('Updating remote index...')
         update_upstream_file_name_tree()
 
     # Print messages if there are any
