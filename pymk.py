@@ -862,7 +862,7 @@ def update_upstream_file_name_tree():
     #
     #  This is why we don't filter out thrashed files here, like we do in
     #  sequential_file_dump().
-    parameters = {'fields':'newStartPageToken,changes(fileId,changeType,removed,file(id,name,mimeType,modifiedTime,md5Checksum,parents,trashed))', 'pageSize':1000}
+    parameters = {'fields':'newStartPageToken,nextPageToken,changes(fileId,changeType,removed,file(id,name,mimeType,modifiedTime,md5Checksum,parents,trashed))', 'pageSize':1000}
     parameters['pageToken'] = store_get(changes_token_prop)
 
     changed = False
@@ -880,6 +880,18 @@ def update_upstream_file_name_tree():
 
         if json_data != None:
             changes = json_data['changes']
+
+            while 'nextPageToken' in json_data.keys():
+                parameters['pageToken'] = json_data['nextPageToken']
+                try:
+                    json_data = google.get('https://www.googleapis.com/drive/v3/changes', params=parameters)
+                    changes += json_data['changes']
+                except Exception as e:
+                    print ('Error while performing request to Google, dump can be restarted by re running the command.')
+                    print (traceback.format_exc())
+                    store(progress_flag_name, True)
+                    break
+
             next_token = json_data['newStartPageToken']
             parameters['pageToken'] = next_token
 
