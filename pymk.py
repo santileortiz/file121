@@ -1022,7 +1022,7 @@ def binding_remove():
     if len(sys.argv) > 2:
         upstream_path = path_cat(sys.argv[2], '')
     else:
-        print ('Missing arguments.')
+        print (f'usage: ./pymk.py {sys._getframe().f_code.co_name} [REMOTE PATH]')
         return
 
     bindings = store_get(bindings_prop, default={})
@@ -1062,7 +1062,7 @@ def binding_add():
         local_path = path_cat(os.path.abspath(path_resolve(sys.argv[2])), '')
         upstream_path = path_cat(sys.argv[3], '')
     else:
-        print ('Missing arguments.')
+        print (f'usage: ./pymk.py {sys._getframe().f_code.co_name} [LOCAL PATH] [REMOTE PATH]')
         return
 
     # Make sure the binding is new
