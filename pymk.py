@@ -55,7 +55,10 @@ def store_upstream_tree(real_root):
     pickle_dump (real_root, upstream_file_tree_fname)
 
 def load_local_tree():
-    return pickle_load (local_file_tree_fname)
+    if path_exists (local_file_tree_fname):
+        return pickle_load (local_file_tree_fname)
+    else:
+        return {'c':{}}
 
 def store_local_tree(root):
     return pickle_dump (root, local_file_tree_fname)
@@ -1041,8 +1044,41 @@ def binding_remove():
     del bindings[upstream_path]
     store(bindings_prop, bindings)
 
+def binding_check(bindings, local_path, upstream_path):
+    if upstream_path in bindings.keys():
+        if local_path == bindings[upstream_path]:
+            print (f"Binding already exists: '{local_path}' -> '{upstream_path}'")
+        else:
+            print (f"Upstream directory already bound: '{upstream_path}'")
+        return False
+    elif local_path in {local_p for _, local_p in bindings.items()}:
+        print (f"Local directory already bound: '{local_path}'")
+        return False
+
+    return True
+
+def binding_create_checked(bindings, local_path, upstream_path):
+    if binding_check (bindings, local_path, upstream_path):
+        bindings[upstream_path] = local_path
+        store(bindings_prop, bindings)
+
+def bind_locally_existent(bindings, local_path, upstream_path):
+    # Add the parent node of the new binding to the local index
+    local_file_name_tree = load_local_tree()
+    path_lst = path_as_list(local_path)
+    local_tree_node = lookup_path (local_file_name_tree, path_lst, silent=True)
+    assert local_tree_node == None, "Local index contains non existent node, it's probably corrupted... this is BAD. Rebuild the local index."
+    ensure_tree_dirpath (path_lst, local_file_name_tree)
+    store_local_tree (local_file_name_tree)
+
+    binding_create_checked (bindings, local_path, upstream_path)
+
+    update_local_file_name_tree()
+
 def binding_add():
-    if len(sys.argv) > 2:
+    locally_existent = get_cli_bool_opt ("--downloaded")
+    rest_parameters = get_cli_no_opt();
+    if rest_parameters != None and len(rest_parameters) == 2:
         # For now bindings can only happen between two directories, there's no
         # way to bind an upstream file into a local directory, this allows
         # having different directory names upstream and locally. Here we make
@@ -1059,8 +1095,8 @@ def binding_add():
         # '/', like rsync does. The problem is I never remember rsync's
         # semantics, I don't want that to happen here.
         # :file_bindings
-        local_path = path_cat(os.path.abspath(path_resolve(sys.argv[2])), '')
-        upstream_path = path_cat(sys.argv[3], '')
+        local_path = path_cat(os.path.abspath(path_resolve(rest_parameters[0])), '')
+        upstream_path = path_cat(rest_parameters[1], '')
     else:
         print (f'usage: ./pymk.py {sys._getframe().f_code.co_name} [LOCAL PATH] [REMOTE PATH]')
         return
@@ -1068,14 +1104,7 @@ def binding_add():
     # Make sure the binding is new
     # TODO: Implement binding update
     bindings = store_get(bindings_prop, default={})
-    if upstream_path in bindings.keys():
-        if local_path == bindings[upstream_path]:
-            print (f"Binding already exists: '{local_path}' -> '{upstream_path}'")
-        else:
-            print (f"Upstream directory already bound: '{upstream_path}'")
-        return
-    elif local_path in {local_p for _, local_p in bindings.items()}:
-        print (f"Local directory already bound: '{local_path}'")
+    if not binding_check (bindings, local_path, upstream_path):
         return
 
     # The whole code keeps the invariant that binding folders always exist in
@@ -1103,8 +1132,7 @@ def binding_add():
             service = google.get_service()
             ensure_upstream_dir_path (service, local_path, upstream_tree, upstream_path)
 
-            bindings[upstream_path] = local_path
-            store(bindings_prop, bindings)
+            binding_create_checked (bindings, local_path, upstream_path)
 
             update_local_file_name_tree()
             update_upstream_file_name_tree()
@@ -1130,25 +1158,16 @@ def binding_add():
         if local_parent_path != None and upstream_parent_path != None:
             local_source = path_cat(local_parent_path, upstream_path.replace(binding_upstream, '', 1))
             shutil.move(local_source, local_path)
-
-            # Add the parent node of the new binding to the local index
-            local_file_name_tree = load_local_tree()
-            path_lst = path_as_list(local_path)
-            local_tree_node = lookup_path (local_file_name_tree, path_lst, silent=True)
-            assert local_tree_node == None, "Local index contains non existent node, it's probably corrupted... this is BAD. Rebuild the local index."
-            ensure_tree_dirpath (path_lst, local_file_name_tree)
-            store_local_tree (local_file_name_tree)
-
-            bindings[upstream_path] = local_path
-            store(bindings_prop, bindings)
-
-            update_local_file_name_tree()
+            bind_locally_existent (bindings, local_path, upstream_path)
 
         else:
             print ("Bindings that download subtrees aren't implemented.")
 
     elif path_exists(local_path) and path_isdir(local_path) and upstream_tree_node != None and is_dir_node(upstream_tree_node):
-        print ("Bindings that merge subtrees aren't implemented.")
+        if locally_existent:
+            bind_locally_existent (bindings, local_path, upstream_path)
+        else:
+            print ("Bindings that merge subtrees aren't implemented.")
 
     elif not path_exists(local_path) and upstream_tree_node == None:
         print ("Bindings that create new empty local and upstream directories aren't implemented.")
@@ -1526,7 +1545,26 @@ def push():
 
     # Print messages if there are any
     status.print()
-    
+
+def download_and_bind():
+    rest_parameters = get_cli_no_opt();
+    if rest_parameters != None and len(rest_parameters) == 2:
+        local_path = path_cat(os.path.abspath(path_resolve(rest_parameters[0])), '')
+        upstream_path = path_cat(rest_parameters[1], '')
+    else:
+        print (f'usage: ./pymk.py {sys._getframe().f_code.co_name} [LOCAL PATH] rclone-remote:path')
+        return
+
+    bindings = store_get(bindings_prop, default={})
+    if binding_check(bindings, local_path, upstream_path):
+        # TODO: This will fail on file names containing '
+        retval = ex (f'rclone copy --create-empty-src-dirs -P \'{upstream_path}\' \'{local_path}\'')
+        if retval == 0:
+            bind_locally_existent (bindings, local_path, ':'.join(upstream_path.split(":")[1:]))
+
+def install_dependencies ():
+    ex ("sudo apt-get install pip python3-requests-oauthlib python3-googleapi python3-dateutil")
+    ex ("sudo pip install google-auth-oauthlib")
 
 if __name__ == "__main__":
     # Everything above this line will be executed for each TAB press.
