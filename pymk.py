@@ -953,7 +953,7 @@ def update_upstream_file_name_tree():
                                 if 'md5Checksum' not in f.keys():
                                     print(f'U {path}')
                                 else:
-                                    old_hash = file_dict_old[f_id]['md5Checksum']
+                                    old_hash = file_dict_old[f_id].get('md5Checksum')
                                     print(f'U {old_hash} -> {f["md5Checksum"]} - {path}')
 
                             else:
@@ -1382,8 +1382,12 @@ def upload_file(service, local_abs_path, upstream_root, upstream_abs_path, statu
 
         print (f"A {local_abs_path} -> {upstream_abs_path}")
 
-        request = service.files().create(body=file_metadata, media_body=data)
-        google.request_execute_cli(request)
+        if data.size() > 0:
+            request = service.files().create(body=file_metadata, media_body=data)
+            google.request_execute_cli(request)
+
+        else:
+            log_error (status, f"File upload failed, local file contains no data: {local_abs_path}")
 
     else:
         log_error (status, f"File upload failed, directory '{dirname}' doesn't exist upstream: {upstream_abs_path}")
